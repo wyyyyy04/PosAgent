@@ -2,10 +2,25 @@
 Excel 读取模块 — 读取主数据表和模板表，返回 pandas DataFrame。
 """
 
+import unicodedata
 from pathlib import Path
 from typing import Tuple
 
 import pandas as pd
+
+
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """对 DataFrame 中所有字符串列做 Unicode NFC 标准化。
+
+    防止 Excel 中的特殊 Unicode 编码（如全角/半角混用、NFD 分解字符）
+    导致后续匹配失败。对所有 object 类型列执行 unicodedata.normalize('NFC', ...)。
+    """
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(
+                lambda x: unicodedata.normalize("NFC", str(x)) if pd.notna(x) else x
+            )
+    return df
 
 # 主数据表必要字段（SOP 为目标列，允许缺失）
 MASTER_REQUIRED_COLUMNS = ["品名", "杯型", "奶底", "做法", "糖"]
@@ -40,7 +55,7 @@ def read_excel(filepath: str, sheet_name=0) -> pd.DataFrame:
     # 去除首尾空白列名（空 DataFrame 的列名可能为整数类型）
     if len(df.columns) > 0:
         df.columns = [str(c).strip() for c in df.columns]
-    return df
+    return _normalize_df(df)
 
 
 def read_master(filepath: str, sheet_name=0) -> pd.DataFrame:

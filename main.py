@@ -135,7 +135,7 @@ def run(args: Optional[list] = None) -> int:
     print(f"     低置信度: {low}")
 
     if low > 0:
-        print(f"\n     ⚠ {low} 行匹配置信度较低，详见校验报告:")
+        print(f"\n     [!] {low} 行匹配置信度较低，详见校验报告:")
         print(f"     {report_path}")
 
         # 列出低置信度行摘要

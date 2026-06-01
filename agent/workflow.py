@@ -155,10 +155,51 @@ def step_match(state: PipelineState) -> PipelineState:
     if state.has_error:
         return state
     try:
+        # ── 断言：验证商品名称在管线各阶段未被改写 ──
+        _assert_product_name_integrity(state)
         state.match_results = match(state.template_canonical, state.master_canonical)
     except Exception as e:
         state.set_error("match", str(e))
     return state
+
+
+def _assert_product_name_integrity(state: PipelineState) -> None:
+    """验证模板商品名称从原始读取到匹配前保持一致。
+
+    对比 state.template_df（原始 Excel 读取值）与
+    state.template_canonical（经 Schema Analyzer → Token Classifier → Rule Engine 处理后）
+    中的 product_name 字段。任何不一致都立即报错，防止 LLM 静默改写数据。
+    """
+    # 找到模板中映射为 product_name 的列
+    fm = state.schema_result.get("field_mapping", {})
+    src_col = None
+    for tcol, cfield in fm.items():
+        if cfield == "product_name":
+            src_col = tcol
+            break
+
+    if src_col is None or src_col not in state.template_df.columns:
+        return  # 无法验证，跳过
+
+    raw_names = state.template_df[src_col].astype(str).str.strip().tolist()
+    canonical_names = [
+        str(r.get("product_name", "")).strip()
+        for r in state.template_canonical
+    ]
+
+    mismatches = []
+    for i, (raw, canonical) in enumerate(zip(raw_names, canonical_names)):
+        if raw != canonical:
+            mismatches.append(
+                f"  行 {i+1}: 原始='{raw}' -> 改写为='{canonical}'"
+            )
+
+    if mismatches:
+        raise ValueError(
+            f"商品名称在管线中被意外改写！{len(mismatches)} 行不一致:\n"
+            + "\n".join(mismatches[:10])
+            + ("\n  ..." if len(mismatches) > 10 else "")
+        )
 
 
 def step_write_output(state: PipelineState) -> PipelineState:

@@ -249,43 +249,58 @@ def classify_batch(
     if not uncached_values:
         return [r for r in results if r is not None]  # type: ignore[return-value]
 
-    # 调用 LLM 处理未命中条目
+    # 调用 LLM 处理未命中条目（大数据量自动分片）
+    _MAX_BATCH = 30  # 每批最多 30 条，防止响应被截断
     if config.USE_MOCK_LLM:
-        # Mock 模式：循环使用 MOCK_TOKEN_RESPONSE
         mock_responses = list(config.MOCK_TOKEN_RESPONSE)
         raw_results = []
         for idx in range(len(uncached_values)):
             raw_results.append(mock_responses[idx % len(mock_responses)])
+        # 验证并填充
+        for j, (i, raw_item) in enumerate(zip(uncached_indices, raw_results)):
+            _validate_result(raw_item, i)
+            for tok in raw_item.get("tokens", []):
+                tok["value"] = str(tok.get("value", "")).strip()
+            results[i] = raw_item
+            if use_cache:
+                _cache[uncached_values[j]] = raw_item
     else:
-        try:
-            raw = _call_llm(uncached_values)
-        except Exception as e:
-            raise RuntimeError(f"LLM 调用失败: {e}") from e
+        # 分片处理，每片独立调用 LLM
+        for chunk_start in range(0, len(uncached_values), _MAX_BATCH):
+            chunk_end = min(chunk_start + _MAX_BATCH, len(uncached_values))
+            chunk_values = uncached_values[chunk_start:chunk_end]
+            chunk_indices = uncached_indices[chunk_start:chunk_end]
 
-        try:
-            raw_results = json.loads(_extract_json(raw))
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"LLM 返回内容无法解析为 JSON:\n---\n{raw}\n---\n错误: {e}"
-            ) from e
+            try:
+                raw = _call_llm(chunk_values)
+            except Exception as e:
+                raise RuntimeError(f"LLM 调用失败 (batch {chunk_start}): {e}") from e
 
-    if not isinstance(raw_results, list):
-        raise ValueError(f"LLM 返回必须是 JSON 数组，实际: {type(raw_results)}")
+            try:
+                chunk_results = json.loads(_extract_json(raw))
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"LLM 返回内容无法解析为 JSON (batch {chunk_start}):\n---\n{raw[:500]}...\n---\n错误: {e}"
+                ) from e
 
-    if len(raw_results) != len(uncached_values):
-        raise ValueError(
-            f"LLM 返回 {len(raw_results)} 条结果，但请求了 {len(uncached_values)} 条"
-        )
+            if not isinstance(chunk_results, list):
+                raise ValueError(
+                    f"LLM 返回必须是 JSON 数组 (batch {chunk_start})，实际: {type(chunk_results)}"
+                )
 
-    # 验证并填充
-    for j, (i, raw_item) in enumerate(zip(uncached_indices, raw_results)):
-        _validate_result(raw_item, i)
-        # 确保 tokens 内 value 是字符串
-        for tok in raw_item.get("tokens", []):
-            tok["value"] = str(tok.get("value", "")).strip()
-        results[i] = raw_item
-        if use_cache:
-            _cache[uncached_values[j]] = raw_item
+            if len(chunk_results) != len(chunk_values):
+                raise ValueError(
+                    f"LLM 返回 {len(chunk_results)} 条，但请求了 {len(chunk_values)} 条 (batch {chunk_start})"
+                )
+
+            # 验证并填充本片结果
+            for j, (i, raw_item) in enumerate(zip(chunk_indices, chunk_results)):
+                _validate_result(raw_item, i)
+                for tok in raw_item.get("tokens", []):
+                    tok["value"] = str(tok.get("value", "")).strip()
+                results[i] = raw_item
+                if use_cache:
+                    _cache[uncached_values[chunk_start + j]] = raw_item
 
     # 安全兜底：任何未被填充的位置返回空结果
     for i in range(len(results)):

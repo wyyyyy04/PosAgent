@@ -43,13 +43,15 @@ Return ONLY a single JSON object. No markdown fences, no extra text:
 {"field_mapping": {"template_col": "canonical_field", ...}, "composite_col": "col_name_or_null", "target_col": "col_name_or_null", "irrelevant_cols": ["col1", ...]}"""
 
 USER_PROMPT_TEMPLATE = """\
-## Template Columns
+## Template Columns (with per-column sample values, NOT full rows)
 {columns}
 
-## Sample Data (first {n} rows)
+## Per-Column Sample Values
 {sample_data}
 
-Analyze the template schema and return the JSON field mapping configuration."""
+Analyze the template schema and return the JSON field mapping configuration.
+IMPORTANT: Use the column NAMES and sample values ONLY to understand semantic types.
+Do NOT modify or rewrite any sample values — they are read-only references."""
 
 # ── 缓存 ────────────────────────────────────────────────────────
 
@@ -82,25 +84,37 @@ def _get_client():
 def _call_llm(columns: List[str], sample_data: List[Dict[str, Any]]) -> str:
     """调用 DeepSeek LLM 分析模板 Schema。
 
+    LLM 只接收列名和每列的去重样例值（最多 3 个），不接收完整行数据，
+    防止 LLM 意外改写原始值。
+
     Args:
         columns: 模板列名列表。
-        sample_data: 模板前 N 行数据（用于提供语义上下文）。
+        sample_data: 模板前 N 行数据（仅用于提取每列的样例值）。
 
     Returns:
         LLM 原始响应文本。
     """
     client = _get_client()
 
-    # 格式化样本数据
-    sample_lines = []
-    for i, row in enumerate(sample_data):
-        row_str = " | ".join(f"{col}: {row.get(col, '')}" for col in columns)
-        sample_lines.append(f"  Row {i+1}: {row_str}")
+    # 为每列提取去重样例值（不保留行间关联，仅用于语义理解）
+    column_samples = []
+    for col in columns:
+        values = []
+        for row in sample_data:
+            v = str(row.get(col, "")).strip()
+            if v and v not in values:
+                values.append(v)
+            if len(values) >= 3:
+                break
+        if values:
+            column_samples.append(f"  - {col}: e.g. {', '.join(values)}")
+        else:
+            column_samples.append(f"  - {col}: (empty)")
 
     user_prompt = USER_PROMPT_TEMPLATE.format(
         columns="\n".join(f"  - {c}" for c in columns),
         n=len(sample_data),
-        sample_data="\n".join(sample_lines),
+        sample_data="\n".join(column_samples),
     )
 
     response = client.chat.completions.create(

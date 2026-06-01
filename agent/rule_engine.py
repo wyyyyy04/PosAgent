@@ -73,8 +73,14 @@ def master_to_canonical(master_df: pd.DataFrame) -> List[Dict[str, Any]]:
                 cr[en_col] = str(val).strip()
 
         # 保留 SOP 字段（目标值，匹配时直接引用）
-        if "SOP" in master_df.columns and not _empty(row.get("SOP")):
-            cr["sop"] = str(row["SOP"]).strip()
+        # 主数据表中 SOP 列可能命名为 "SOP"、"配料" 或 "SOP 代码"
+        sop_col = None
+        for candidate in ["SOP", "配料", "SOP 代码", "代码"]:
+            if candidate in master_df.columns:
+                sop_col = candidate
+                break
+        if sop_col and not _empty(row.get(sop_col)):
+            cr["sop"] = str(row[sop_col]).strip()
         else:
             cr["sop"] = None
 

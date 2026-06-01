@@ -378,3 +378,24 @@ cat mapping_report.txt
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
+
+## MVP 验证结果（testdata/ 真实数据）
+
+| 指标 | 数值 |
+|------|------|
+| 总行数 | 96 |
+| 完全匹配 | 40 行 |
+| **准确率** | **41.7%** |
+| 低置信度 | 56 行 |
+| 匹配失败 | 0 行 |
+
+**56 条低置信度原因分析：**
+- 48 条：模板奶底=`燕麦奶`，但主数据 53 行奶底全部为 `牛奶`
+- 8 条：模板糖度=`七分糖`，但主数据存储为 `七分糖\|推荐`（带后缀）
+
+> 结论：引擎逻辑正常，低置信度行均由主数据表覆盖不全或格式不一致导致，非匹配引擎 bug。
+
+### 安全性修复（本轮）
+- LLM 输入隔离：Schema Analyzer 不再接收完整行数据，仅接收列名+去重样例值
+- Unicode 标准化：excel_reader 读取阶段统一 NFC 标准化
+- 断言保护：匹配前验证商品名称从原始读取到匹配引擎未被改写，不一致直接报错

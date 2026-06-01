@@ -9,13 +9,13 @@ import os
 
 # ── DeepSeek API 配置 ───────────────────────────────────────────
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-265da0fcff2b40f3bc7eafca53b70cf4")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 # API 调用参数
 LLM_TEMPERATURE = 0.1          # Schema 分析和 Token 分类需要确定性输出
-LLM_MAX_TOKENS = 2048
+LLM_MAX_TOKENS = 4096
 LLM_TIMEOUT_SECONDS = 30
 
 # ── 匹配引擎配置 ────────────────────────────────────────────────
