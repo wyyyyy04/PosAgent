@@ -341,7 +341,7 @@ cat mapping_report.txt
 
 ---
 
-## MVP 范围（第一阶段）
+## MVP 范围（第一阶段）✅ 全部完成
 
 - [x] 单模板支持
 - [x] Schema 自动理解（LLM 一次性分析）
@@ -349,6 +349,7 @@ cat mapping_report.txt
 - [x] 商品名精确匹配（RapidFuzz）
 - [x] 属性组合规则匹配
 - [x] 低置信度标注 + 校验报告
+- [x] 端到端 CLI 管线
 - [ ] 多模板批量处理（第二阶段）
 - [ ] 历史映射规则缓存（第二阶段）
 - [ ] Agent 自学习（第三阶段）
@@ -376,4 +377,4 @@ cat mapping_report.txt
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 37/37 passed | LLM 组合字段拆解、Token 类型分类、缺失维度检测、单值缓存 | `47a2498` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
-| CLI 入口 | main.py | ⬜ 未开始 | - | - | - |
+| CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
