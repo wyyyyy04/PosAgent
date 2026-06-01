@@ -374,6 +374,6 @@ cat mapping_report.txt
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 34/34 passed | 主数据标准化、模板标准化、Token 验证、必要维度检查、奶底通配 | `93ca42a` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 37/37 passed | LLM 组合字段拆解、Token 类型分类、缺失维度检测、单值缓存 | `47a2498` |
-| Matching Engine | agent/matching_engine.py | ⬜ 未开始 | - | - | - |
+| Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ⬜ 未开始 | - | - | - |
 | CLI 入口 | main.py | ⬜ 未开始 | - | - | - |
