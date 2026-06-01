@@ -1,0 +1,594 @@
+"""
+LangGraph 工作流定义 — 编排完整 POS 模板映射管线。
+
+节点顺序:
+  load_data → analyze_schema → classify_tokens → normalize → validate → match → write_output
+
+每个节点读取上一个节点的输出，写入本节点的结果。任一步骤失败可捕获并进入错误处理。
+兼容无 langgraph 安装环境，提供 run_pipeline() 作为纯顺序回退方案。
+"""
+
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+
+from agent.matching_engine import generate_report as me_generate_report
+from agent.matching_engine import match
+from agent.rule_engine import (
+    check_row_completeness,
+    master_to_canonical,
+    template_to_canonical,
+    validate_tokens,
+)
+from agent.schema_analyzer import analyze_from_dataframe
+from agent.token_classifier import classify_from_dataframe, reset_cache as tc_reset_cache
+from excel_io.excel_reader import read_master, read_template
+from excel_io.excel_writer import write_report, write_result
+
+# ── 工作流状态键 ────────────────────────────────────────────────
+
+
+class PipelineState:
+    """管线状态容器。每个节点读/写此对象上的属性。"""
+
+    def __init__(
+        self,
+        master_path: str,
+        template_path: str,
+        output_path: str,
+        report_path: Optional[str] = None,
+        target_col: str = "配料",
+    ):
+        self.master_path = master_path
+        self.template_path = template_path
+        self.output_path = output_path
+        self.report_path = report_path or output_path.replace(".xlsx", "_report.txt")
+        self.target_col = target_col
+
+        # 中间数据
+        self.master_df: Optional[pd.DataFrame] = None
+        self.template_df: Optional[pd.DataFrame] = None
+        self.schema_result: Optional[Dict[str, Any]] = None
+        self.token_results: Optional[List[Dict[str, Any]]] = None
+        self.master_canonical: Optional[List[Dict[str, Any]]] = None
+        self.template_canonical: Optional[List[Dict[str, Any]]] = None
+        self.validated_tokens: Optional[List[Dict[str, Any]]] = None
+        self.match_results: Optional[List[Dict[str, Any]]] = None
+        self.report: str = ""
+
+        # 错误信息
+        self.error: Optional[str] = None
+        self.error_step: Optional[str] = None
+
+    def set_error(self, step: str, msg: str) -> None:
+        """记录错误并阻止后续步骤。"""
+        self.error = msg
+        self.error_step = step
+
+    @property
+    def has_error(self) -> bool:
+        return self.error is not None
+
+
+# ── 管线节点 ────────────────────────────────────────────────────
+
+
+def step_load_data(state: PipelineState) -> PipelineState:
+    """Step 1: 读取主数据表和模板表。"""
+    if state.has_error:
+        return state
+    try:
+        state.master_df = read_master(state.master_path)
+        state.template_df = read_template(state.template_path)
+    except Exception as e:
+        state.set_error("load_data", str(e))
+    return state
+
+
+def step_analyze_schema(state: PipelineState) -> PipelineState:
+    """Step 2: Schema Analyzer 分析模板字段语义。"""
+    if state.has_error:
+        return state
+    try:
+        state.schema_result = analyze_from_dataframe(state.template_df)
+    except Exception as e:
+        state.set_error("analyze_schema", str(e))
+    return state
+
+
+def step_classify_tokens(state: PipelineState) -> PipelineState:
+    """Step 3: Token Classifier 解析组合字段。"""
+    if state.has_error:
+        return state
+    try:
+        composite_col = state.schema_result.get("composite_col")
+        if composite_col and composite_col in state.template_df.columns:
+            state.token_results = classify_from_dataframe(
+                state.template_df, composite_col
+            )
+        else:
+            # 无组合字段，提供空 token 结果
+            state.token_results = [
+                {"tokens": [], "missing": []}
+                for _ in range(len(state.template_df))
+            ]
+    except Exception as e:
+        state.set_error("classify_tokens", str(e))
+    return state
+
+
+def step_normalize(state: PipelineState) -> PipelineState:
+    """Step 4: Rule Engine — 主数据 + 模板标准化为 Canonical Schema。"""
+    if state.has_error:
+        return state
+    try:
+        fm = state.schema_result.get("field_mapping", {})
+        composite_col = state.schema_result.get("composite_col", "")
+        state.master_canonical = master_to_canonical(state.master_df)
+        state.template_canonical = template_to_canonical(
+            state.template_df, fm, composite_col, state.token_results
+        )
+    except Exception as e:
+        state.set_error("normalize", str(e))
+    return state
+
+
+def step_validate(state: PipelineState) -> PipelineState:
+    """Step 5: Rule Engine — Token 验证 + 必要维度检查。"""
+    if state.has_error:
+        return state
+    try:
+        state.validated_tokens = validate_tokens(state.token_results)
+
+        # 检查每行完整度，在 canonical 行上标记
+        for i, trow in enumerate(state.template_canonical):
+            missing = check_row_completeness(trow)
+            if missing:
+                trow["_completeness_issues"] = missing
+    except Exception as e:
+        state.set_error("validate", str(e))
+    return state
+
+
+def step_match(state: PipelineState) -> PipelineState:
+    """Step 6: Matching Engine — 模板行 → 主数据行匹配。"""
+    if state.has_error:
+        return state
+    try:
+        state.match_results = match(state.template_canonical, state.master_canonical)
+    except Exception as e:
+        state.set_error("match", str(e))
+    return state
+
+
+def step_write_output(state: PipelineState) -> PipelineState:
+    """Step 7: 写入结果 Excel + 校验报告。"""
+    if state.has_error:
+        return state
+    try:
+        # 构建结果 DataFrame
+        sops = [r.get("sop", "") for r in state.match_results]
+        confidences = [r.get("confidence", "") for r in state.match_results]
+
+        result_df = pd.DataFrame({
+            state.target_col: sops,
+            "匹配置信度": confidences,
+        })
+
+        write_result(
+            state.template_path,
+            state.output_path,
+            result_df,
+            target_col=state.target_col,
+        )
+
+        # 生成报告
+        report_text = me_generate_report(state.match_results)
+        state.report = report_text
+
+        # 写入报告文件
+        write_report(state.report_path, _build_low_confidence_list(state.match_results))
+    except Exception as e:
+        state.set_error("write_output", str(e))
+    return state
+
+
+def _build_low_confidence_list(
+    match_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """从匹配结果中提取低置信度行列表（供 write_report 使用）。"""
+    low = []
+    for i, r in enumerate(match_results):
+        if r.get("confidence") == "LOW_CONFIDENCE":
+            low.append({
+                "row_index": i + 2,  # Excel 行号（1=表头）
+                "product_name": f"行 {i+1}",
+                "reason": (
+                    f"商品名分数={r.get('product_score', 0):.1f}, "
+                    f"匹配类型={r.get('match_type', '?')}, "
+                    f"不匹配属性={r.get('unmatched_attributes', [])}"
+                ),
+            })
+    return low
+
+
+# ── LangGraph 工作流（可选）─────────────────────────────────────
+
+def build_graph():
+    """构建 LangGraph StateGraph。
+
+    需要 langgraph 已安装。返回编译后的 app 对象。
+
+    Raises:
+        ImportError: langgraph 未安装。
+    """
+    from langgraph.graph import END, StateGraph
+
+    # 由于 PipelineState 不是 TypedDict，使用简单 dict 作为状态载体
+    # 实际运行时会传入 PipelineState 实例
+    graph = StateGraph(dict)
+
+    graph.add_node("load_data", _dict_node_wrapper(step_load_data))
+    graph.add_node("analyze_schema", _dict_node_wrapper(step_analyze_schema))
+    graph.add_node("classify_tokens", _dict_node_wrapper(step_classify_tokens))
+    graph.add_node("normalize", _dict_node_wrapper(step_normalize))
+    graph.add_node("validate", _dict_node_wrapper(step_validate))
+    graph.add_node("match", _dict_node_wrapper(step_match))
+    graph.add_node("write_output", _dict_node_wrapper(step_write_output))
+
+    graph.set_entry_point("load_data")
+    graph.add_edge("load_data", "analyze_schema")
+    graph.add_edge("analyze_schema", "classify_tokens")
+    graph.add_edge("classify_tokens", "normalize")
+    graph.add_edge("normalize", "validate")
+    graph.add_edge("validate", "match")
+    graph.add_edge("match", "write_output")
+    graph.add_edge("write_output", END)
+
+    return graph.compile()
+
+
+def _dict_node_wrapper(node_fn):
+    """将基于 PipelineState 的节点函数包装为接受/返回 dict 的形式。"""
+
+    def wrapper(state: dict) -> dict:
+        # 从 dict 中恢复 PipelineState
+        ps = state.get("_pipeline_state")
+        if ps is None:
+            return state
+        node_fn(ps)
+        # 将 PipelineState 序列化回 dict（简化：直接引用）
+        state["_pipeline_state"] = ps
+        state["error"] = ps.error
+        state["match_results"] = ps.match_results
+        state["report"] = ps.report
+        return state
+
+    return wrapper
+
+
+# ── 公开 API ────────────────────────────────────────────────────
+
+
+def run_pipeline(
+    master_path: str,
+    template_path: str,
+    output_path: str,
+    report_path: Optional[str] = None,
+    target_col: str = "配料",
+    use_langgraph: bool = False,
+) -> PipelineState:
+    """运行完整的 POS 模板映射管线。
+
+    这是工作流的主入口。默认使用纯顺序执行（不依赖 langgraph）。
+    传入 use_langgraph=True 可启用 LangGraph 编排。
+
+    Args:
+        master_path: 主数据表 Excel 路径。
+        template_path: POS 模板 Excel 路径。
+        output_path: 输出 Excel 路径。
+        report_path: 校验报告路径（默认 output_path 同目录 + _report.txt）。
+        target_col: 需要填充的目标列名，默认 "配料"。
+        use_langgraph: 是否使用 LangGraph 编排（需安装 langgraph）。
+
+    Returns:
+        PipelineState，包含所有中间数据和最终结果。
+        检查 state.has_error 判断是否成功。
+
+    Raises:
+        ImportError: use_langgraph=True 但 langgraph 未安装。
+    """
+    state = PipelineState(
+        master_path=master_path,
+        template_path=template_path,
+        output_path=output_path,
+        report_path=report_path,
+        target_col=target_col,
+    )
+
+    if use_langgraph:
+        app = build_graph()
+        result = app.invoke({"_pipeline_state": state})
+        # 从结果 dict 中恢复 PipelineState
+        ps = result.get("_pipeline_state", state)
+        return ps
+
+    # 纯顺序执行
+    steps = [
+        ("load_data", step_load_data),
+        ("analyze_schema", step_analyze_schema),
+        ("classify_tokens", step_classify_tokens),
+        ("normalize", step_normalize),
+        ("validate", step_validate),
+        ("match", step_match),
+        ("write_output", step_write_output),
+    ]
+
+    for step_name, step_fn in steps:
+        step_fn(state)
+        if state.has_error:
+            break
+
+    return state
+
+
+# ── 自测 ────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import os
+    import tempfile
+
+    os.environ["USE_MOCK_LLM"] = "1"
+    import importlib
+
+    importlib.reload(__import__("config"))
+
+    passed = 0
+    failed = 0
+
+    def check(condition, msg):
+        global passed, failed
+        if condition:
+            passed += 1
+            print(f"  PASS  {msg}")
+        else:
+            failed += 1
+            print(f"  FAIL  {msg}")
+
+    print("=== Workflow 自测（Mock LLM 模式）===\n")
+
+    tmpdir = tempfile.mkdtemp()
+    master_path = os.path.join(tmpdir, "master.xlsx")
+    template_path = os.path.join(tmpdir, "template.xlsx")
+    output_path = os.path.join(tmpdir, "output.xlsx")
+
+    # ── 覆盖 Mock 响应以匹配测试数据 ──
+    import config as cfg
+
+    original_mock_token = list(cfg.MOCK_TOKEN_RESPONSE)
+    original_mock_schema = dict(cfg.MOCK_SCHEMA_RESPONSE)
+
+    # 为 Test 1-3 设置 Token 分类 Mock（与模板行一一对应）
+    cfg.MOCK_TOKEN_RESPONSE = [
+        {  # Row 1: 牛奶, 少冰, 七分糖
+            "tokens": [
+                {"value": "牛奶", "type": "奶底"},
+                {"value": "少冰", "type": "温度"},
+                {"value": "七分糖", "type": "糖度"},
+            ],
+            "missing": ["茶底"],
+        },
+        {  # Row 2: 牛奶, 去冰, 标准糖
+            "tokens": [
+                {"value": "牛奶", "type": "奶底"},
+                {"value": "去冰", "type": "温度"},
+                {"value": "标准糖", "type": "糖度"},
+            ],
+            "missing": ["茶底"],
+        },
+        {  # Row 3: 正常冰, 标准糖
+            "tokens": [
+                {"value": "正常冰", "type": "温度"},
+                {"value": "标准糖", "type": "糖度"},
+            ],
+            "missing": ["茶底", "奶底"],
+        },
+    ]
+    tc_reset_cache()
+
+    # ── 准备测试用主数据表和模板表 ──
+    pd.DataFrame({
+        "品名": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳", "珍珠奶茶"],
+        "杯型": ["中杯", "中杯", "大杯", "中杯"],
+        "奶底": ["牛奶", "牛奶", "", "椰乳"],
+        "做法": ["少冰", "去冰", "正常冰", "热"],
+        "糖": ["七分糖", "标准糖", "标准糖", "无糖"],
+        "SOP": [
+            "T240、B30/80、S4",
+            "T265、B30/105、S5",
+            "T200、B50/100、S5",
+            "T180、B40/80、S2",
+        ],
+    }).to_excel(master_path, index=False)
+
+    pd.DataFrame({
+        "菜品名称": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳"],
+        "规格": ["中杯", "中杯", "大杯"],
+        "口味做法组合": [
+            "牛奶, 少冰, 七分糖",
+            "牛奶, 去冰, 标准糖",
+            "正常冰, 标准糖",
+        ],
+        "配料": ["", "", ""],
+    }).to_excel(template_path, index=False)
+
+    try:
+        # ── 1. 完整管线运行 ──
+        print("1. 完整管线 run_pipeline()")
+        state = run_pipeline(master_path, template_path, output_path)
+
+        check(not state.has_error, f"管线无错误（错误: {state.error}）")
+        check(state.master_df is not None, "master_df 已加载")
+        check(state.template_df is not None, "template_df 已加载")
+        check(state.schema_result is not None, "schema_result 已生成")
+        check(state.token_results is not None, "token_results 已生成")
+        check(state.master_canonical is not None, "master_canonical 已转换")
+        check(state.template_canonical is not None, "template_canonical 已转换")
+        check(state.validated_tokens is not None, "validated_tokens 已验证")
+        check(state.match_results is not None, "match_results 已生成")
+        check(len(state.match_results) == 3, f"3 条匹配结果（实际 {len(state.match_results)}）")
+        print()
+
+        # ── 2. 匹配结果验证 ──
+        print("2. 匹配结果验证")
+        check(
+            state.match_results[0]["confidence"] == "HIGH",
+            f"第 1 行 HIGH（实际 {state.match_results[0]['confidence']}）",
+        )
+        check(
+            state.match_results[1]["confidence"] == "HIGH",
+            f"第 2 行 HIGH（实际 {state.match_results[1]['confidence']}）",
+        )
+        check(
+            state.match_results[2]["product_score"] >= 90,
+            f"第 3 行商品名分数 ≥ 90（实际 {state.match_results[2]['product_score']}）",
+        )
+        print()
+
+        # ── 3. 输出文件验证 ──
+        print("3. 输出文件验证")
+        check(os.path.exists(output_path), "输出 Excel 文件已生成")
+        report_path = output_path.replace(".xlsx", "_report.txt")
+        check(os.path.exists(report_path), "校验报告已生成")
+
+        # 读取输出 Excel 验证内容
+        df_out = pd.read_excel(output_path)
+        check("配料" in df_out.columns, "输出包含 '配料' 列")
+        check("匹配置信度" in df_out.columns, "输出包含 '匹配置信度' 列")
+        check(
+            df_out.iloc[0]["配料"] == "T240、B30/80、S4",
+            f"第 1 行 SOP 正确（实际 {df_out.iloc[0]['配料']}）",
+        )
+
+        # 读取报告验证
+        report_text = open(report_path, encoding="utf-8").read()
+        check("POS Template Mapping" in report_text, "报告包含标题")
+        print()
+
+        # ── 4. 多候选精确匹配 ──
+        print("4. 多候选精确属性选择")
+        cfg.MOCK_TOKEN_RESPONSE = [
+            {  # 燕麦奶, 少冰, 七分糖
+                "tokens": [
+                    {"value": "燕麦奶", "type": "奶底"},
+                    {"value": "少冰", "type": "温度"},
+                    {"value": "七分糖", "type": "糖度"},
+                ],
+                "missing": ["茶底"],
+            },
+        ]
+        tc_reset_cache()
+
+        # 同产品名三个主数据行（不同属性），应精确选择对的属性
+        pd.DataFrame({
+            "品名": ["测试茶", "测试茶", "测试茶"],
+            "杯型": ["大杯", "中杯", "小杯"],
+            "奶底": ["牛奶", "燕麦奶", ""],
+            "做法": ["正常冰", "少冰", "去冰"],
+            "糖": ["全糖", "七分糖", "三分糖"],
+            "SOP": ["SOP-A", "SOP-B", "SOP-C"],
+        }).to_excel(master_path, index=False)
+
+        pd.DataFrame({
+            "菜品名称": ["测试茶"],
+            "规格": ["中杯"],
+            "口味做法组合": ["燕麦奶, 少冰, 七分糖"],
+            "配料": [""],
+        }).to_excel(template_path, index=False)
+
+        state2 = run_pipeline(master_path, template_path, output_path)
+        check(not state2.has_error, "二次运行无错误")
+        check(len(state2.match_results) == 1, "1 条匹配")
+        check(
+            state2.match_results[0]["sop"] == "SOP-B",
+            f"选中 SOP-B（中杯/燕麦奶/少冰/七分糖）（实际 {state2.match_results[0]['sop']}）",
+        )
+        check(state2.match_results[0]["confidence"] == "HIGH", "置信度 HIGH")
+        print()
+
+        # ── 5. 错误处理：文件不存在 ──
+        print("5. 错误处理：文件不存在")
+        state_err = run_pipeline(
+            "不存在的文件.xlsx", template_path, output_path
+        )
+        check(state_err.has_error, "文件不存在 → has_error=True")
+        check(state_err.error_step == "load_data", "错误发生在 load_data 步骤")
+        print()
+
+        # ── 6. 报告内容验证 ──
+        print("6. 报告内容")
+        check(
+            "总行数" in state.report,
+            "报告包含 '总行数'",
+        )
+        check(
+            "高置信度" in state.report,
+            "报告包含置信度统计",
+        )
+        print()
+
+        # ── 7. 无匹配商品 → LOW_CONFIDENCE ──
+        print("7. 无匹配商品 → LOW_CONFIDENCE")
+        cfg.MOCK_TOKEN_RESPONSE = [
+            {  # 正常冰, 标准糖
+                "tokens": [
+                    {"value": "正常冰", "type": "温度"},
+                    {"value": "标准糖", "type": "糖度"},
+                ],
+                "missing": ["茶底", "奶底"],
+            },
+        ]
+        tc_reset_cache()
+        pd.DataFrame({
+            "品名": ["产品A"],
+            "杯型": ["中杯"],
+            "奶底": [""],
+            "做法": ["正常冰"],
+            "糖": ["标准糖"],
+            "SOP": ["SOP-X"],
+        }).to_excel(master_path, index=False)
+
+        pd.DataFrame({
+            "菜品名称": ["完全不存在的商品"],
+            "规格": ["中杯"],
+            "口味做法组合": ["正常冰, 标准糖"],
+            "配料": [""],
+        }).to_excel(template_path, index=False)
+
+        state3 = run_pipeline(master_path, template_path, output_path)
+        check(not state3.has_error, "无错误")
+        check(len(state3.match_results) == 1, "1 条结果")
+        check(
+            state3.match_results[0]["confidence"] == "LOW_CONFIDENCE",
+            f"无匹配 → LOW_CONFIDENCE（实际 {state3.match_results[0]['confidence']}）",
+        )
+        check(
+            state3.match_results[0]["match_type"] == "best_guess",
+            f"匹配类型 best_guess（实际 {state3.match_results[0]['match_type']}）",
+        )
+        print()
+
+    finally:
+        # 清理临时文件
+        for f in [master_path, template_path, output_path,
+                  output_path.replace(".xlsx", "_report.txt")]:
+            if os.path.exists(f):
+                os.remove(f)
+        os.rmdir(tmpdir)
+
+    # 还原 Mock 设置
+    cfg.MOCK_TOKEN_RESPONSE = original_mock_token
+    cfg.MOCK_SCHEMA_RESPONSE = original_mock_schema
+    tc_reset_cache()
+
+    print(f"=== 结果: {passed} passed, {failed} failed ===")

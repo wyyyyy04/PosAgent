@@ -310,7 +310,7 @@ pos-mapping-agent/
 ├── data/
 │   ├── token_dict.py        # Token 词典
 │   └── canonical_schema.py  # 标准 Schema 定义
-├── io/
+├── excel_io/
 │   ├── excel_reader.py      # 读取 Excel
 │   └── excel_writer.py      # 写入结果（保留格式）
 ├── config.py                # API Key、阈值配置
@@ -368,7 +368,7 @@ cat mapping_report.txt
 
 | 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
 |------|------|------|----------|------|------|
-| Excel 读写 | io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
+| Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 25/25 passed | 5 种类型，26 个 Token | `—` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 34/34 passed | 主数据标准化、模板标准化、Token 验证、必要维度检查、奶底通配 | `93ca42a` |
