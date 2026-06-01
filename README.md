@@ -363,3 +363,17 @@ cat mapping_report.txt
 4. **口味做法组合字段缺项是正常情况**：LLM 需输出哪些维度存在、哪些缺失，Rule Engine 按缺失维度调整匹配约束。
 5. **匹配失败不报错**：填入最佳猜测，标注 `LOW_CONFIDENCE`，汇总进报告。
 6. **保留 Excel 原始格式**：使用 openpyxl 写入，不破坏原有样式、公式和数据验证。
+
+## 开发进度
+
+| 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
+|------|------|------|----------|------|------|
+| Excel 读写 | io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
+| Token 词典 | data/token_dict.py | ✅ 已完成 | 25/25 passed | 5 种类型，26 个 Token | `—` |
+| Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
+| Rule Engine | agent/rule_engine.py | ✅ 已完成 | 34/34 passed | 主数据标准化、模板标准化、Token 验证、必要维度检查、奶底通配 | `93ca42a` |
+| Schema Analyzer | agent/schema_analyzer.py | ⬜ 未开始 | - | - | - |
+| Token Classifier | agent/token_classifier.py | ⬜ 未开始 | - | - | - |
+| Matching Engine | agent/matching_engine.py | ⬜ 未开始 | - | - | - |
+| LangGraph 工作流 | agent/workflow.py | ⬜ 未开始 | - | - | - |
+| CLI 入口 | main.py | ⬜ 未开始 | - | - | - |
