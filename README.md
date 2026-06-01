@@ -372,7 +372,7 @@ cat mapping_report.txt
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 25/25 passed | 5 种类型，26 个 Token | `—` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 34/34 passed | 主数据标准化、模板标准化、Token 验证、必要维度检查、奶底通配 | `93ca42a` |
-| Schema Analyzer | agent/schema_analyzer.py | ⬜ 未开始 | - | - | - |
+| Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
 | Token Classifier | agent/token_classifier.py | ⬜ 未开始 | - | - | - |
 | Matching Engine | agent/matching_engine.py | ⬜ 未开始 | - | - | - |
 | LangGraph 工作流 | agent/workflow.py | ⬜ 未开始 | - | - | - |
