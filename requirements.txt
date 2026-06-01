@@ -1,0 +1,8 @@
+langgraph
+langchain
+openai
+openpyxl
+pandas
+rapidfuzz
+sentence-transformers
+faiss-cpu
