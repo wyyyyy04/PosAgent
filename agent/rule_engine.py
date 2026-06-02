@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from data.token_dict import lookup, is_known, UNKNOWN_TOKEN
+from data.token_dict import lookup, is_known, normalize_token, UNKNOWN_TOKEN
 
 # ── Canonical Schema 字段 ─────────────────────────────────────
 
@@ -70,7 +70,8 @@ def master_to_canonical(master_df: pd.DataFrame) -> List[Dict[str, Any]]:
                 # 奶底和茶底允许空值（通配），其余维度保留 None 以便后续检测
                 cr[en_col] = None if en_col in WILDCARD_DIMENSIONS else val
             else:
-                cr[en_col] = str(val).strip()
+                raw = str(val).strip()
+                cr[en_col] = normalize_token(raw)
 
         # 保留 SOP 字段（目标值，匹配时直接引用）
         # 主数据表中 SOP 列可能命名为 "SOP"、"配料" 或 "SOP 代码"
@@ -122,7 +123,8 @@ def template_to_canonical(
             if tcol in template_df.columns:
                 val = trow[tcol]
                 if not _empty(val):
-                    cr[cfield] = str(val).strip()
+                    raw = str(val).strip()
+                    cr[cfield] = normalize_token(raw)
 
         # Step 2: 组合字段注入
         if i < len(token_results):
@@ -132,7 +134,7 @@ def template_to_canonical(
                 token_type = tok.get("type", "")
                 cfield = TOKEN_TYPE_TO_FIELD.get(token_type)
                 if cfield and cfield in CANONICAL_FIELDS:
-                    cr[cfield] = token_val.strip()
+                    cr[cfield] = normalize_token(str(token_val).strip())
 
             # 记录缺失维度
             cr["_missing_dimensions"] = tr.get("missing", [])
@@ -159,11 +161,15 @@ def validate_tokens(token_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     for tr in token_results:
         new_tokens = []
         for tok in tr.get("tokens", []):
-            val = tok.get("value", "")
+            raw_val = str(tok.get("value", "")).strip()
+            # 先 normalize 再 lookup：处理带后缀的 token 值
+            cleaned = normalize_token(raw_val)
             llm_type = tok.get("type", "")
-            verified = lookup(val)
+            verified = lookup(cleaned)
             new_tokens.append({
                 **tok,
+                "value": cleaned,               # 更新为清洗后的值
+                "raw_value": raw_val,            # 保留原始值供审计
                 "verified_type": verified,
                 "is_known": verified != UNKNOWN_TOKEN,
                 # 如果 LLM 分类和词典不一致，以词典为准
@@ -245,6 +251,22 @@ if __name__ == "__main__":
     check(m3[0]["temperature"] == "热", "做法正常")
     print()
 
+    # ── 3b. master_to_canonical: suffix 清洗 ──
+    print("3b. master_to_canonical（suffix 清洗）")
+    master_suffix = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "奶底": "牛奶", "做法": "正常冰|推荐", "糖": "七分糖|推荐", "SOP": "T240"},
+        {"品名": "珍珠奶茶", "杯型": "大杯/新", "奶底": "椰乳", "做法": "热", "糖": "标准糖|推荐", "SOP": "T180"},
+    ])
+    ms = master_to_canonical(master_suffix)
+    check(ms[0]["sugar"] == "七分糖", f"'七分糖|推荐' → '七分糖'（实际 {ms[0]['sugar']}）")
+    check(ms[0]["temperature"] == "正常冰", f"'正常冰|推荐' → '正常冰'（实际 {ms[0]['temperature']}）")
+    check(ms[1]["size"] == "大杯", f"'大杯/新' → '大杯'（实际 {ms[1]['size']}）")
+    check(ms[1]["sugar"] == "标准糖", f"'标准糖|推荐' → '标准糖'（实际 {ms[1]['sugar']}）")
+    # 无后缀的不受影响
+    check(ms[0]["milk_base"] == "牛奶", "无后缀 milk_base 保持不变")
+    check(ms[0]["product_name"] == "浅浅清茶", "无后缀 product_name 保持不变")
+    print()
+
     # ── 4. template_to_canonical ──
     print("4. template_to_canonical（字段映射 + Token 注入）")
     template_df = pd.DataFrame([
@@ -292,6 +314,29 @@ if __name__ == "__main__":
     check("茶底" in t_rows[1]["_missing_dimensions"], "missing 记录: 茶底")
     print()
 
+    # ── 4b. template_to_canonical: suffix 清洗 ──
+    print("4b. template_to_canonical（直接映射 + Token 注入 suffix 清洗）")
+    template_suffix_df = pd.DataFrame([
+        {"菜品名称": "五黄高纤慢养瓶", "规格": "五角瓶/新", "口味做法组合": "红茶, 十二分糖|推荐, 温热", "配料": ""},
+    ])
+    # Token 值带后缀（模拟 LLM 偶尔返回带后缀的情况）
+    token_results_suffix = [
+        {
+            "tokens": [
+                {"value": "红茶", "type": "茶底"},
+                {"value": "十二分糖|推荐", "type": "糖度"},
+                {"value": "温热", "type": "温度"},
+            ],
+            "missing": ["奶底"],
+        },
+    ]
+    ts = template_to_canonical(template_suffix_df, field_mapping, "口味做法组合", token_results_suffix)
+    check(ts[0]["size"] == "五角瓶", f"直接映射 '五角瓶/新' → '五角瓶'（实际 {ts[0]['size']}）")
+    check(ts[0]["sugar"] == "十二分糖", f"Token 注入 '十二分糖|推荐' → '十二分糖'（实际 {ts[0]['sugar']}）")
+    check(ts[0]["tea_base"] == "红茶", "无后缀 Token 不受影响")
+    check(ts[0]["temperature"] == "温热", "无后缀 Token 不受影响")
+    print()
+
     # ── 5. validate_tokens ──
     print("5. validate_tokens（Token 验证）")
     sample_results = [
@@ -316,6 +361,28 @@ if __name__ == "__main__":
     ]
     vc = validate_tokens(conflict_result)
     check(vc[0]["tokens"][0]["type_conflict"] is True, "牛奶被 LLM 标为糖度 → type_conflict=True")
+    print()
+
+    # ── 5b. validate_tokens: suffix 清洗后验证 ──
+    print("5b. validate_tokens（suffix 清洗后验证）")
+    suffix_tokens = [
+        {"tokens": [
+            {"value": "七分糖|推荐", "type": "糖度"},
+            {"value": "珍珠|推荐", "type": "配料"},   # 词典外，即使去后缀也未知
+            {"value": "正常冰/新", "type": "温度"},
+        ]},
+    ]
+    vs = validate_tokens(suffix_tokens)
+    # '七分糖|推荐' → normalize → '七分糖' → lookup → '糖度'
+    check(vs[0]["tokens"][0]["is_known"] is True, "'七分糖|推荐' 清洗后 is_known=True")
+    check(vs[0]["tokens"][0]["value"] == "七分糖", "cleaned value='七分糖'")
+    check(vs[0]["tokens"][0]["raw_value"] == "七分糖|推荐", "raw_value 保留原始值")
+    # '珍珠|推荐' → normalize 不匹配 → '珍珠|推荐' → lookup → UNKNOWN_TOKEN
+    check(vs[0]["tokens"][1]["is_known"] is False, "'珍珠|推荐' 清洗失败 is_known=False")
+    check(vs[0]["tokens"][1]["verified_type"] == "UNKNOWN_TOKEN", "unknown 标注 UNKNOWN_TOKEN")
+    # '正常冰/新' → normalize → '正常冰' → lookup → '温度'
+    check(vs[0]["tokens"][2]["is_known"] is True, "'正常冰/新' 清洗后 is_known=True")
+    check(vs[0]["tokens"][2]["value"] == "正常冰", "cleaned value='正常冰'")
     print()
 
     # ── 6. check_row_completeness ──
