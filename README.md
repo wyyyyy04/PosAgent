@@ -370,9 +370,9 @@ cat mapping_report.txt
 | 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
 |------|------|------|----------|------|------|
 | Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
-| Token 词典 | data/token_dict.py | ✅ 已完成 | 25/25 passed | 5 种类型，26 个 Token | `—` |
+| Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，26 个 Token；新增 normalize_token() 四级优先级清洗、KNOWN_SUFFIXES 文档 | `d2de102` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
-| Rule Engine | agent/rule_engine.py | ✅ 已完成 | 34/34 passed | 主数据标准化、模板标准化、Token 验证、必要维度检查、奶底通配 | `93ca42a` |
+| Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 37/37 passed | LLM 组合字段拆解、Token 类型分类、缺失维度检测、单值缓存 | `47a2498` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
