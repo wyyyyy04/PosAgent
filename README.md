@@ -370,11 +370,11 @@ cat mapping_report.txt
 | 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
 |------|------|------|----------|------|------|
 | Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
-| Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，26 个 Token；新增 normalize_token() 四级优先级清洗、KNOWN_SUFFIXES 文档 | `d2de102` |
+| Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，28 个 Token；normalize_token() 四级优先级清洗；testdata 真数据补全茉莉绿茶 | `d2de102` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
-| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 37/37 passed | LLM 组合字段拆解、Token 类型分类、缺失维度检测、单值缓存 | `47a2498` |
+| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 48/48 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）；无 LLM 调用；进程内去重缓存 | `9189a04` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
@@ -394,7 +394,13 @@ cat mapping_report.txt
 
 > 结论：糖度后缀格式问题已通过 `normalize_token()` 清洗解决（+8 行 → HIGH）。剩余低置信度均为数据覆盖不全，非匹配引擎 bug。
 
-### 安全性修复（本轮）
+### 安全性修复（上一轮）
 - LLM 输入隔离：Schema Analyzer 不再接收完整行数据，仅接收列名+去重样例值
 - Unicode 标准化：excel_reader 读取阶段统一 NFC 标准化
 - 断言保护：匹配前验证商品名称从原始读取到匹配引擎未被改写，不一致直接报错
+
+### Token Classifier 纯规则改造（本轮 `9189a04`）
+- **改动**：Token Classifier 由 LLM 改为纯规则词典分类（逗号切割 → normalize_token() → lookup()）
+- **效果**：API 调用 5 次 → 1 次（仅剩 Schema Analyzer），总耗时 45.5s → 3.4s（**13 倍提速**）
+- **准确率不变**：50.0%（48 HIGH / 48 LOW），低置信度仍为数据覆盖不全
+- **词典补充**：扫描 testdata/ 真数据，新增茶底词条「茉莉绿茶」
