@@ -10,6 +10,7 @@ CLI 入口 — POS Template Mapping Agent。
 import argparse
 import os
 import sys
+import time
 from typing import Optional
 
 
@@ -110,6 +111,11 @@ def run(args: Optional[list] = None) -> int:
     print("-" * 56)
 
     # 运行管线
+    import config as _cfg
+    llm_mode = "MOCK" if _cfg.USE_MOCK_LLM else "REAL"
+    print(f"  LLM 模式: {llm_mode} (模型: {_cfg.DEEPSEEK_MODEL})")
+
+    t0 = time.time()
     state = run_pipeline(
         master_path=opts.master,
         template_path=opts.template,
@@ -118,21 +124,26 @@ def run(args: Optional[list] = None) -> int:
         target_col=opts.target_col,
         use_langgraph=opts.langgraph,
     )
+    elapsed = time.time() - t0
 
     if state.has_error:
         print(f"\n[FAIL] 管线在 '{state.error_step}' 步骤失败:")
         print(f"       {state.error}")
+        print(f"      耗时: {elapsed:.1f}s")
         return 1
 
     # 输出摘要
     total = len(state.match_results)
     high = sum(1 for r in state.match_results if r.get("confidence") == "HIGH")
     low = total - high
+    api_calls = state.api_call_count if hasattr(state, 'api_call_count') else "?"
 
     print(f"\n[OK] 映射完成!")
-    print(f"     总行数: {total}")
-    print(f"     高置信度: {high}")
-    print(f"     低置信度: {low}")
+    print(f"     API 调用: {api_calls} 次")
+    print(f"     总耗时:   {elapsed:.1f}s")
+    print(f"     总行数:   {total}")
+    print(f"     高置信度: {high} ({100*high/total:.1f}%)")
+    print(f"     低置信度: {low} ({100*low/total:.1f}%)")
 
     if low > 0:
         print(f"\n     [!] {low} 行匹配置信度较低，详见校验报告:")

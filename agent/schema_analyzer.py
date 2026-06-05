@@ -53,6 +53,22 @@ Analyze the template schema and return the JSON field mapping configuration.
 IMPORTANT: Use the column NAMES and sample values ONLY to understand semantic types.
 Do NOT modify or rewrite any sample values — they are read-only references."""
 
+# ── API 调用计数器 ─────────────────────────────────────────────
+
+_api_call_count: int = 0
+
+
+def get_api_call_count() -> int:
+    """返回 Schema Analyzer 的真实 API 调用次数。"""
+    return _api_call_count
+
+
+def reset_api_call_count() -> None:
+    """重置 API 调用计数器（用于测试）。"""
+    global _api_call_count
+    _api_call_count = 0
+
+
 # ── 缓存 ────────────────────────────────────────────────────────
 
 _cache: Dict[str, Dict[str, Any]] = {}
@@ -110,6 +126,9 @@ def _call_llm(columns: List[str], sample_data: List[Dict[str, Any]]) -> str:
             column_samples.append(f"  - {col}: e.g. {', '.join(values)}")
         else:
             column_samples.append(f"  - {col}: (empty)")
+
+    global _api_call_count
+    _api_call_count += 1
 
     user_prompt = USER_PROMPT_TEMPLATE.format(
         columns="\n".join(f"  - {c}" for c in columns),

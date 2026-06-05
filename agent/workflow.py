@@ -60,6 +60,9 @@ class PipelineState:
         self.error: Optional[str] = None
         self.error_step: Optional[str] = None
 
+        # 统计
+        self.api_call_count: int = 0
+
     def set_error(self, step: str, msg: str) -> None:
         """记录错误并阻止后续步骤。"""
         self.error = msg
@@ -347,11 +350,21 @@ def run_pipeline(
         target_col=target_col,
     )
 
+    # 重置 API 调用计数器（每次管线运行重新计数）
+    from agent.schema_analyzer import reset_api_call_count as _sa_reset
+    from agent.token_classifier import reset_api_call_count as _tc_reset
+    _sa_reset()
+    _tc_reset()
+
     if use_langgraph:
         app = build_graph()
         result = app.invoke({"_pipeline_state": state})
         # 从结果 dict 中恢复 PipelineState
         ps = result.get("_pipeline_state", state)
+        # 收集 API 调用统计
+        from agent.schema_analyzer import get_api_call_count as _sa_count
+        from agent.token_classifier import get_api_call_count as _tc_count
+        ps.api_call_count = _sa_count() + _tc_count()
         return ps
 
     # 纯顺序执行
@@ -369,6 +382,11 @@ def run_pipeline(
         step_fn(state)
         if state.has_error:
             break
+
+    # 收集 API 调用统计
+    from agent.schema_analyzer import get_api_call_count as _sa_count
+    from agent.token_classifier import get_api_call_count as _tc_count
+    state.api_call_count = _sa_count() + _tc_count()
 
     return state
 

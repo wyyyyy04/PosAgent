@@ -56,6 +56,22 @@ Classify each composite field value below into tokens with types, and identify m
 
 Return the JSON array now."""
 
+# ── API 调用计数器 ─────────────────────────────────────────────
+
+_api_call_count: int = 0
+
+
+def get_api_call_count() -> int:
+    """返回 Token Classifier 的真实 API 调用次数。"""
+    return _api_call_count
+
+
+def reset_api_call_count() -> None:
+    """重置 API 调用计数器（用于测试）。"""
+    global _api_call_count
+    _api_call_count = 0
+
+
 # ── 缓存 ────────────────────────────────────────────────────────
 
 _cache: Dict[str, Dict[str, Any]] = {}
@@ -96,6 +112,9 @@ def _call_llm(composite_values: List[str]) -> str:
         display = val.strip() if val and val.strip() else "(空)"
         lines.append(f"  [{i}] {display}")
     composite_list = "\n".join(lines)
+
+    global _api_call_count
+    _api_call_count += 1
 
     user_prompt = USER_PROMPT_TEMPLATE.format(composite_list=composite_list)
 
