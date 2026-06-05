@@ -373,9 +373,9 @@ cat mapping_report.txt
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，28 个 Token；normalize_token() 四级优先级清洗；testdata 真数据补全茉莉绿茶 | `d2de102` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
-| Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
+| Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
-| 长期记忆 | data/memory.py | ✅ 已完成 | 23/23 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、/memory 指令共用 | `5649150` |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
@@ -412,3 +412,12 @@ cat mapping_report.txt
 - **三级兜底机制**：标准词典 → 长期记忆 → 交互式确认（同词每进程仅问一次）
 - **交互确认**：三个选项（加入词典/标 UNKNOWN 继续/跳过此行）、支持 mock hook 自动化测试
 - **Token Classifier 自测更新**：新增记忆命中、会话缓存、跳过行等场景（40/40 passed）
+
+### 模板规则缓存（本轮 `cbf30ae`）
+- **目标**：同一模板第二次运行时跳过 LLM Schema 分析，API 调用从 1 次降到 0 次
+- **三级缓存架构**：进程内缓存（SHA256）→ 磁盘记忆（MD5 指纹）→ LLM 调用
+- **指纹生成**：模板所有列名排序后用逗号拼接，取 MD5 摘要（列名顺序无关）
+- **CLI 输出区分**：
+  - 缓存命中：`[Schema] 缓存命中：模板指纹 c2743182...（跳过 LLM）`
+  - 新模板：`[Schema] 新模板，调用 LLM 分析...`
+- **testdata 验证**：首轮 API=1, 3.3s → 次轮 API=0, 0.1s（**33 倍提速**，准确率不变 50.0%）
