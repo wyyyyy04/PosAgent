@@ -146,6 +146,43 @@ def add_template_rule(key: str, value: Any) -> None:
     _save()
 
 
+def get_template_rule(fingerprint: str) -> Optional[Dict[str, Any]]:
+    """根据模板指纹查询缓存的字段映射配置。
+
+    指纹由模板所有列名排序后 MD5 生成，作为 template_rules 的键。
+
+    Args:
+        fingerprint: 模板指纹（MD5 hex 字符串）。
+
+    Returns:
+        缓存的 schema 分析结果 dict，或 None（未命中）。
+    """
+    data = _load()
+    entry = data.get("template_rules", {}).get(fingerprint)
+    if entry and isinstance(entry, dict) and "rule" in entry:
+        return entry["rule"]
+    return None
+
+
+def save_template_rule(fingerprint: str, rule: Dict[str, Any]) -> None:
+    """将模板字段映射配置按指纹持久化存储。
+
+    Args:
+        fingerprint: 模板指纹（MD5 hex 字符串）。
+        rule: Schema Analyzer 输出的字段映射配置 dict。
+    """
+    global _dirty
+    data = _load()
+    today = date.today().isoformat()
+    data.setdefault("template_rules", {})[fingerprint] = {
+        "rule": rule,
+        "cached_at": today,
+        "columns_hash": fingerprint,
+    }
+    _dirty = True
+    _save()
+
+
 def add_match_correction(entry: Dict[str, Any]) -> None:
     """添加匹配修正记录并持久化。"""
     global _dirty
@@ -247,11 +284,40 @@ if __name__ == "__main__":
     check("黑芝麻仙草" in aliases and "豆乳" in aliases, "两条都在")
     print()
 
-    # ── 6. template_rules ──
-    print("6. template_rules 读写")
+    # ── 6. template_rules 通用读写 ──
+    print("6. template_rules 通用读写")
     check(get_template_rules() == {}, "初始为空")
     add_template_rule("last_composite_col", "口味做法组合")
     check(get_template_rules().get("last_composite_col") == "口味做法组合", "写入后正确")
+    print()
+
+    # ── 6b. get_template_rule / save_template_rule（指纹缓存） ──
+    print("6b. 模板指纹缓存（get_template_rule / save_template_rule）")
+    fp1 = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+    check(get_template_rule(fp1) is None, "新指纹查不到 → None")
+
+    test_rule = {
+        "field_mapping": {"菜品名称": "product_name", "规格": "size"},
+        "composite_col": "口味做法组合",
+        "target_col": "配料",
+        "irrelevant_cols": [],
+    }
+    save_template_rule(fp1, test_rule)
+    cached = get_template_rule(fp1)
+    check(cached is not None, "写入后可查到")
+    check(cached.get("composite_col") == "口味做法组合", "缓存内容正确")
+    check(cached.get("target_col") == "配料", "缓存内容完整")
+    print()
+
+    # ── 6c. 持久化：reload 后指纹缓存仍在 ──
+    print("6c. 指纹缓存持久化（reload 后仍存在）")
+    reload()
+    cached2 = get_template_rule(fp1)
+    check(cached2 is not None, "reload 后缓存仍在")
+    check(cached2.get("field_mapping") == test_rule["field_mapping"], "内容完整一致")
+    # 不同指纹不命中
+    fp2 = "ffffffffffffffffffffffffffffffff"
+    check(get_template_rule(fp2) is None, "不同指纹 → None")
     print()
 
     # ── 7. match_corrections ──

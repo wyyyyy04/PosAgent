@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 
 import config
 from data.canonical_schema import CANONICAL_FIELDS
+from data.memory import get_template_rule as mem_get_template_rule
+from data.memory import save_template_rule as mem_save_template_rule
 
 # ── Prompt 模板 ──────────────────────────────────────────────────
 
@@ -75,8 +77,17 @@ _cache: Dict[str, Dict[str, Any]] = {}
 
 
 def _cache_key(columns: List[str]) -> str:
-    """基于列名列表生成缓存键。"""
+    """基于列名列表生成进程内缓存键（SHA256）。"""
     return hashlib.sha256(",".join(sorted(columns)).encode()).hexdigest()
+
+
+def _template_fingerprint(columns: List[str]) -> str:
+    """基于列名列表生成模板指纹（MD5），用于持久化缓存键。
+
+    对模板所有列名排序后用逗号拼接，取 MD5 摘要。
+    同一模板的列名无论顺序如何，指纹一致。
+    """
+    return hashlib.md5(",".join(sorted(columns)).encode()).hexdigest()
 
 
 def reset_cache() -> None:
@@ -261,15 +272,27 @@ def analyze(
 
     sample_data = sample_data or []
 
-    # 检查缓存
+    # ── 三级缓存：进程内 → 磁盘记忆 → LLM ──
     key = _cache_key(columns)
     if use_cache and key in _cache:
         return _cache[key]
 
-    # Mock 模式（自测用）
+    # 计算模板指纹，查询磁盘记忆
+    fingerprint = _template_fingerprint(columns)
+    if use_cache:
+        cached_rule = mem_get_template_rule(fingerprint)
+        if cached_rule is not None:
+            # 命中磁盘记忆，同步到进程内缓存
+            _cache[key] = cached_rule
+            print(f"[Schema] 缓存命中：模板指纹 {fingerprint[:12]}...（跳过 LLM）")
+            return cached_rule
+
+    # 未命中，需调用 LLM（或 Mock）
     if config.USE_MOCK_LLM:
+        print("[Schema] 新模板，调用 LLM 分析...（Mock 模式）")
         raw = json.dumps(config.MOCK_SCHEMA_RESPONSE, ensure_ascii=False)
     else:
+        print("[Schema] 新模板，调用 LLM 分析...")
         try:
             raw = _call_llm(columns, sample_data)
         except Exception as e:
@@ -291,8 +314,13 @@ def analyze(
     # 验证
     _validate_response(data, columns)
 
-    # 缓存
+    # 写入进程内缓存
     _cache[key] = data
+
+    # 写入磁盘记忆（持久化）
+    if use_cache:
+        mem_save_template_rule(fingerprint, data)
+
     return data
 
 
@@ -461,6 +489,91 @@ if __name__ == "__main__":
     check(result_no_composite["irrelevant_cols"] == [], "无无关列")
     config.MOCK_SCHEMA_RESPONSE = original_mock
     print()
+
+    # ── 10. 模板指纹持久化缓存（第一次 → Mock 调用，写入记忆） ──
+    print("10. 指纹持久化缓存 — 第一次运行（Mock 调用 + 写入记忆）")
+    reset_cache()
+    from data.memory import reset_memory, get_template_rule as mem_get_rule
+    reset_memory()
+
+    columns_a = ["菜品名称", "规格", "口味做法组合", "配料"]
+    # 计算预期指纹
+    expected_fp = _template_fingerprint(columns_a)
+
+    # 第一次：未命中记忆，走 Mock 流程
+    result_a1 = analyze(columns_a, [], use_cache=True)
+    check(isinstance(result_a1, dict), "第一次返回 dict")
+    check(result_a1.get("composite_col") == "口味做法组合", "内容正确")
+
+    # 验证已写入记忆
+    cached_a = mem_get_rule(expected_fp)
+    check(cached_a is not None, "第一次运行后记忆中有缓存")
+    check(cached_a.get("composite_col") == "口味做法组合", "记忆缓存内容正确")
+    print()
+
+    # ── 11. 第二次运行同一模板 → 缓存命中，不调用 Mock ──
+    print("11. 第二次运行同一模板 → 缓存命中（免 LLM）")
+    # 改变 Mock 响应，如果走了 Mock 流程结果会不同 → 可验证是否真正命中缓存
+    original_mock = config.MOCK_SCHEMA_RESPONSE
+    config.MOCK_SCHEMA_RESPONSE = {
+        "field_mapping": {"X": "product_name"},  # 不同的响应
+        "composite_col": None,
+        "target_col": None,
+        "irrelevant_cols": [],
+    }
+
+    # 清进程内缓存以仅依赖记忆缓存
+    reset_cache()
+    result_a2 = analyze(columns_a, [], use_cache=True)
+
+    # 应命中记忆缓存，返回与第一次一致的结果（不是改过的 Mock）
+    check(result_a2.get("composite_col") == "口味做法组合",
+          "第二次命中记忆缓存 → composite_col 与第一次一致")
+    check(result_a2.get("field_mapping") == result_a1.get("field_mapping"),
+          "field_mapping 与第一次完全一致")
+    config.MOCK_SCHEMA_RESPONSE = original_mock
+    print()
+
+    # ── 12. 模板列名变化 → 指纹不同，重新调用 ──
+    print("12. 模板列名变化 → 不同指纹 → 重新调用")
+    columns_b = ["菜品名称", "规格", "口味做法组合", "配料", "备注"]
+    fp_b = _template_fingerprint(columns_b)
+    check(fp_b != expected_fp, f"不同列名 → 不同指纹 ({fp_b[:12]}... ≠ {expected_fp[:12]}...)")
+
+    cached_b_before = mem_get_rule(fp_b)
+    check(cached_b_before is None, "新模板指纹初始无缓存")
+
+    result_b = analyze(columns_b, [], use_cache=True)
+    check(isinstance(result_b, dict), "新模板分析成功")
+
+    cached_b_after = mem_get_rule(fp_b)
+    check(cached_b_after is not None, "新模板结果已写入记忆")
+    print()
+
+    # ── 13. 手动删除 memory → 退化为首次运行 ──
+    print("13. 手动清空记忆 → 退化为首次运行")
+    reset_memory()
+    check(mem_get_rule(expected_fp) is None, "清空后原指纹无缓存")
+
+    reset_cache()
+    result_a3 = analyze(columns_a, [], use_cache=True)
+    check(isinstance(result_a3, dict), "清空记忆后仍正常运行（Mock 兜底）")
+    # 清空后重新写入
+    cached_a3 = mem_get_rule(expected_fp)
+    check(cached_a3 is not None, "清空后再运行 → 重新写入记忆")
+    check(cached_a3.get("composite_col") == "口味做法组合", "重新写入内容正确")
+    print()
+
+    # ── 14. _template_fingerprint 确定性 ──
+    print("14. _template_fingerprint 确定性验证")
+    cols_unsorted = ["配料", "规格", "口味做法组合", "菜品名称"]
+    fp_unsorted = _template_fingerprint(cols_unsorted)
+    check(fp_unsorted == expected_fp, f"列名顺序不影响指纹 ({fp_unsorted[:12]}... = {expected_fp[:12]}...)")
+    print()
+
+    # 清理
+    from data.memory import reset_memory as rm
+    rm()
 
     # ── 汇总 ──
     print(f"=== 结果: {passed} passed, {failed} failed ===")
