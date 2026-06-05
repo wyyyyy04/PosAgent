@@ -321,6 +321,8 @@ pos-mapping-agent/
 
 ## CLI 使用方式（MVP）
 
+### 直接执行映射任务
+
 ```bash
 # 基本用法
 python main.py \
@@ -337,6 +339,47 @@ python main.py \
 
 # 查看校验报告
 cat mapping_report.txt
+```
+
+### REPL 交互模式
+
+不带参数直接启动，进入交互式命令行：
+
+```bash
+python main.py
+```
+
+REPL 内支持以下斜杠指令：
+
+**记忆管理 (`/memory`):**
+
+| 指令 | 说明 |
+|------|------|
+| `/memory list` | 列出所有 token 别名（词语/类型/添加时间） |
+| `/memory add <词语> <类型>` | 添加 token 别名，类型: tea_base/milk_base/temperature/sugar/size |
+| `/memory delete <词语>` | 删除指定词条（需确认 y/n） |
+| `/memory reset` | 清空所有长期记忆（需二次确认 yes/不可撤销） |
+
+**模板管理 (`/template`):**
+
+| 指令 | 说明 |
+|------|------|
+| `/template list` | 列出已缓存的模板（指纹前8位/列数/缓存时间） |
+| `/template show <指纹前N位>` | 查看模板字段映射配置详情 |
+| `/template clear <指纹前N位>` | 删除指定模板缓存（需确认） |
+
+**映射任务 (`/run`):**
+
+```bash
+/run -m <主数据表> -t <模板> -o <输出> [--target-col <列名>] [-r <报告>]
+```
+
+**通用:**
+
+| 指令 | 说明 |
+|------|------|
+| `/help` | 显示完整指令列表和说明 |
+| `/exit` 或 `Ctrl+C` | 退出 REPL |
 ```
 
 ---
@@ -379,6 +422,7 @@ cat mapping_report.txt
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
+| REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
 
@@ -421,3 +465,10 @@ cat mapping_report.txt
   - 缓存命中：`[Schema] 缓存命中：模板指纹 c2743182...（跳过 LLM）`
   - 新模板：`[Schema] 新模板，调用 LLM 分析...`
 - **testdata 验证**：首轮 API=1, 3.3s → 次轮 API=0, 0.1s（**33 倍提速**，准确率不变 50.0%）
+
+### /指令系统 REPL（本轮 `a27f660`）
+- **入口**：`python main.py` 无参数启动 REPL 交互模式
+- **10 个斜杠指令**：`/help` `/exit` `/run` `/memory list|add|delete|reset` `/template list|show|clear`
+- **类型映射**：支持中英文类型名（tea_base↔茶底、milk_base↔奶底等）
+- **安全机制**：删除/清空操作需确认（delete: y/n, reset: yes/不可撤销）
+- **REPL 内 /run**：复用 main.run()，无需退出即可执行映射任务
