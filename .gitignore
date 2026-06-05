@@ -6,6 +6,9 @@ __pycache__/
 # Environment
 .env
 
+# Long-term memory (user-local, not in git)
+.pos_agent/
+
 # Test data
 *.xlsx
 !example*.xlsx

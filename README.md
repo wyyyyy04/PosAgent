@@ -374,7 +374,8 @@ cat mapping_report.txt
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
-| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 48/48 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）；无 LLM 调用；进程内去重缓存 | `9189a04` |
+| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 23/23 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、/memory 指令共用 | _待提交_ |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
@@ -399,8 +400,15 @@ cat mapping_report.txt
 - Unicode 标准化：excel_reader 读取阶段统一 NFC 标准化
 - 断言保护：匹配前验证商品名称从原始读取到匹配引擎未被改写，不一致直接报错
 
-### Token Classifier 纯规则改造（本轮 `9189a04`）
+### Token Classifier 纯规则改造（`9189a04`）
 - **改动**：Token Classifier 由 LLM 改为纯规则词典分类（逗号切割 → normalize_token() → lookup()）
 - **效果**：API 调用 5 次 → 1 次（仅剩 Schema Analyzer），总耗时 45.5s → 3.4s（**13 倍提速**）
 - **准确率不变**：50.0%（48 HIGH / 48 LOW），低置信度仍为数据覆盖不全
 - **词典补充**：扫描 testdata/ 真数据，新增茶底词条「茉莉绿茶」
+
+### 长期记忆 + 未知词兜底（本轮）
+- **新增** `data/memory.py`：JSON 持久化存储（`~/.pos_agent/memory.json`），不入 git
+- **存储结构**：`token_aliases`（未知词→类型映射）、`template_rules`、`match_corrections` 三类
+- **三级兜底机制**：标准词典 → 长期记忆 → 交互式确认（同词每进程仅问一次）
+- **交互确认**：三个选项（加入词典/标 UNKNOWN 继续/跳过此行）、支持 mock hook 自动化测试
+- **Token Classifier 自测更新**：新增记忆命中、会话缓存、跳过行等场景（40/40 passed）

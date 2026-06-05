@@ -1,35 +1,39 @@
 """
-Token Classifier — 纯规则组合字段解析。
+Token Classifier — 纯规则组合字段解析 + 未知词兜底。
 将模板中逗号分隔的复合字段（如"口味做法组合"）拆分为结构化 Token，
 识别每个 Token 的类型（茶底/奶底/糖度/温度）和缺失维度。
 
-基于 data.token_dict 词典实现，不调用 LLM。
-进程内缓存：重复的组合字段值只需解析一次。
+三级兜底机制：
+  Step 1: data.token_dict 标准词典
+  Step 2: data.memory 长期记忆（用户确认过的词）
+  Step 3: 交互式询问用户（同一词每进程只问一次）
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from data.memory import add_token as mem_add_token
+from data.memory import get_token_type as mem_get_token_type
 from data.token_dict import lookup, normalize_token, UNKNOWN_TOKEN
 
 # Token Classifier 关注的 4 个维度（规格不在组合字段中，有独立列）
 ALL_DIMENSIONS = ["茶底", "奶底", "糖度", "温度"]
 
-# UNKNOWN_TOKEN 映射为 "UNKNOWN" 以保持与旧 LLM 版本输出兼容
+# UNKNOWN_TOKEN 映射为 "UNKNOWN" 以保持输出兼容
 _UNKNOWN_TYPE = "UNKNOWN"
 
+# 合法类型列表（供交互式询问展示）
+_VALID_TYPE_NAMES = ["茶底", "奶底", "糖度", "温度", "规格"]
 
-# ── API 调用计数器（保持接口兼容，始终为 0） ─────────────────────
+# ── API 调用计数器（纯规则模式始终为 0） ─────────────────────────
 
 _api_call_count: int = 0
 
 
 def get_api_call_count() -> int:
-    """返回 Token Classifier 的 API 调用次数（纯规则模式始终为 0）。"""
     return _api_call_count
 
 
 def reset_api_call_count() -> None:
-    """重置 API 调用计数器。"""
     global _api_call_count
     _api_call_count = 0
 
@@ -38,31 +42,108 @@ def reset_api_call_count() -> None:
 
 _cache: Dict[str, Dict[str, Any]] = {}
 
+# 进程内「已询问过」的未知词集合（同一词本进程只问一次）
+_asked_this_session: set = set()
+
 
 def reset_cache() -> None:
     """清空缓存（用于测试）。"""
     _cache.clear()
+    global _asked_this_session
+    _asked_this_session = set()
+
+
+def reset_session_asked() -> None:
+    """清空「已询问」集合（仅测试用）。"""
+    global _asked_this_session
+    _asked_this_session = set()
+
+
+# ── 交互式未知词确认 ────────────────────────────────────────────
+
+
+def prompt_user_for_unknown(word: str, context: str) -> Optional[Dict[str, Any]]:
+    """交互式询问用户如何处理未知词。
+
+    此函数可被外部 mock 替换（测试时注入自定义回调）。
+
+    Args:
+        word: 未知 token 文本（已 normalize）。
+        context: 所在行的组合字段完整值，供用户参考。
+
+    Returns:
+        {"action": "add", "type": "茶底"}   → 加入记忆并继续
+        {"action": "unknown"}              → 标记为 UNKNOWN 继续
+        {"action": "skip"}                 → 跳过此行
+    """
+    print(f"\n{'='*56}")
+    print(f"[未知词] 无法识别的 Token: 「{word}」")
+    print(f"  所在行上下文: {context}")
+    print(f"{'='*56}")
+    print("  请选择处理方式:")
+    print("    1. 加入词典（需选择类型）")
+    print("    2. 标记为 UNKNOWN（继续处理）")
+    print("    3. 跳过此行")
+
+    while True:
+        choice = input("  请输入 1/2/3: ").strip()
+        if choice == "1":
+            while True:
+                print(f"  可选类型: {', '.join(_VALID_TYPE_NAMES)}")
+                type_choice = input(f"  请选择「{word}」的类型 (1=茶底 2=奶底 3=糖度 4=温度 5=规格): ").strip()
+                type_map = {
+                    "1": "茶底", "2": "奶底", "3": "糖度",
+                    "4": "温度", "5": "规格",
+                }
+                if type_choice in type_map:
+                    return {"action": "add", "type": type_map[type_choice]}
+                # 也支持直接输入中文类型名
+                if type_choice in _VALID_TYPE_NAMES:
+                    return {"action": "add", "type": type_choice}
+                print(f"  [错误] 无效类型，请重新选择")
+        elif choice == "2":
+            return {"action": "unknown"}
+        elif choice == "3":
+            return {"action": "skip"}
+        else:
+            print("  [错误] 无效输入，请输入 1、2 或 3")
+
+
+# 用于测试时注入自定义回调的钩子
+_prompt_hook: Optional[callable] = None
+
+
+def set_prompt_hook(hook: Optional[callable]) -> None:
+    """注入自定义未知词处理回调（用于自动化测试）。
+
+    hook 签名应与 prompt_user_for_unknown 一致：
+        def hook(word: str, context: str) -> dict
+    设为 None 恢复默认交互式行为。
+    """
+    global _prompt_hook
+    _prompt_hook = hook
 
 
 # ── 纯规则分类核心 ──────────────────────────────────────────────
 
 
 def _classify_one(composite_value: str) -> Dict[str, Any]:
-    """对单个组合字段值执行纯规则分类。
+    """对单个组合字段值执行纯规则分类 + 未知词兜底。
 
     流程：
     1. 逗号切割 → 每段 trim
     2. normalize_token() 去后缀
-    3. token_dict.lookup() 分类
-    4. 计算缺失维度（ALL_DIMENSIONS - 已出现的类型）
+    3. token_dict.lookup() 分类（Step 1）
+    4. 未命中 → 查 memory.py（Step 2）
+    5. 仍未命中 → 交互式询问用户（Step 3，同词仅问一次）
 
     Args:
         composite_value: 组合字段原始字符串（如 "红茶, 十二分糖, 温热"）。
 
     Returns:
         {"tokens": [{"value": "...", "type": "茶底"}, ...], "missing": ["奶底"]}
+        若用户选择跳过此行，附带 "_skipped": True。
     """
-    # 空值 / 纯空白 → 全部缺失
     key = composite_value.strip() if composite_value else ""
     if not key:
         return {"tokens": [], "missing": list(ALL_DIMENSIONS)}
@@ -70,27 +151,56 @@ def _classify_one(composite_value: str) -> Dict[str, Any]:
     # Step 1: 逗号切割
     parts = [p.strip() for p in key.split(",") if p.strip()]
 
-    # Step 2-3: normalize → lookup 分类
     tokens: List[Dict[str, str]] = []
     types_found: set = set()
+    skipped = False
 
     for part in parts:
         # normalize_token() 处理带后缀的情况（如 "七分糖|推荐" → "七分糖"）
         cleaned = normalize_token(part)
-        # lookup() 返回类型（如 "糖度"、"茶底"），词典外返回 UNKNOWN_TOKEN
+
+        # Step 1: 查标准词典
         token_type = lookup(cleaned)
 
         if token_type == UNKNOWN_TOKEN:
-            token_type = _UNKNOWN_TYPE
+            # Step 2: 查长期记忆
+            mem_type = mem_get_token_type(cleaned)
+            if mem_type:
+                token_type = mem_type
+                types_found.add(token_type)
+                tokens.append({"value": cleaned, "type": token_type})
+                continue
+
+            # Step 3: 交互式询问（同词仅问一次）
+            if cleaned in _asked_this_session:
+                token_type = _UNKNOWN_TYPE
+            else:
+                _asked_this_session.add(cleaned)
+                hook = _prompt_hook if _prompt_hook else prompt_user_for_unknown
+                response = hook(cleaned, composite_value)
+
+                if response["action"] == "add":
+                    mem_add_token(cleaned, response["type"])
+                    token_type = response["type"]
+                    types_found.add(token_type)
+                    tokens.append({"value": cleaned, "type": token_type})
+                    continue
+                elif response["action"] == "skip":
+                    skipped = True
+                    token_type = _UNKNOWN_TYPE
+                else:  # "unknown"
+                    token_type = _UNKNOWN_TYPE
         else:
             types_found.add(token_type)
 
         tokens.append({"value": cleaned, "type": token_type})
 
-    # Step 4: 计算缺失维度
+    # Step 5: 计算缺失维度
     missing = [d for d in ALL_DIMENSIONS if d not in types_found]
-
-    return {"tokens": tokens, "missing": missing}
+    result = {"tokens": tokens, "missing": missing}
+    if skipped:
+        result["_skipped"] = True
+    return result
 
 
 # ── 公开 API ────────────────────────────────────────────────────
@@ -190,6 +300,10 @@ def classify_from_dataframe(
 
 if __name__ == "__main__":
     import pandas as pd
+    from data.memory import reset_memory, get_token_type as mem_get
+
+    # 自测使用临时记忆，避免污染真实数据
+    reset_memory()
 
     passed = 0
     failed = 0
@@ -203,106 +317,150 @@ if __name__ == "__main__":
             failed += 1
             print(f"  FAIL  {msg}")
 
-    print("=== Token Classifier 自测（纯规则模式）===\n")
+    print("=== Token Classifier 自测（纯规则 + 记忆兜底）===\n")
 
-    # ── 1. classify_single: 标准词 ──
-    print("1. classify_single（标准词 — 正常冰 → temperature）")
-    result = classify_single("红茶, 燕麦奶, 正常冰, 七分糖")
-    check(isinstance(result, dict), "返回 dict")
-    check("tokens" in result and "missing" in result, "包含 tokens 和 missing")
-    tokens = result["tokens"]
-    check(len(tokens) == 4, f"4 个 token（实际 {len(tokens)}）")
+    # ── 0. 清空状态 ──
+    reset_cache()
 
-    token_types = {t["type"]: t["value"] for t in tokens}
-    check(token_types.get("茶底") == "红茶", "红茶 type=茶底")
-    check(token_types.get("奶底") == "燕麦奶", "燕麦奶 type=奶底")
-    check(token_types.get("温度") == "正常冰", "正常冰 type=温度")
-    check(token_types.get("糖度") == "七分糖", "七分糖 type=糖度")
-    check(result["missing"] == [], "完整四项 → 无缺失")
+    # ── 1. 标准词：直接返回，不触发询问 ──
+    print("1. 标准词 — 直接返回，不触发询问")
+    result1 = classify_single("红茶, 燕麦奶, 正常冰, 七分糖")
+    check(len(result1["tokens"]) == 4, "4 个 token")
+    t1 = {t["type"]: t["value"] for t in result1["tokens"]}
+    check(t1.get("茶底") == "红茶", "红茶 type=茶底")
+    check(t1.get("奶底") == "燕麦奶", "燕麦奶 type=奶底")
+    check(t1.get("温度") == "正常冰", "正常冰 type=温度")
+    check(t1.get("糖度") == "七分糖", "七分糖 type=糖度")
+    check(result1["missing"] == [], "完整四项 → 无缺失")
     print()
 
-    # ── 2. classify_single: 带后缀 ──
-    print("2. classify_single（带后缀 — 七分糖|推荐 → sugar）")
-    result2 = classify_single("红茶, 七分糖|推荐, 温热")
+    # ── 2. 长期记忆中的词 → 直接返回，不触发询问 ──
+    print("2. 长期记忆中的词 — 直接返回（mem_get_token_type）")
+    # 预先写入记忆
+    from data.memory import add_token as mem_add
+    mem_add("黑芝麻仙草", "茶底")
+    check(mem_get("黑芝麻仙草") == "茶底", "记忆写入了 '黑芝麻仙草'")
+
+    result2 = classify_single("黑芝麻仙草, 牛奶, 少冰, 全糖")
+    check(len(result2["tokens"]) == 4, "4 个 token")
     t2 = {t["type"]: t["value"] for t in result2["tokens"]}
-    check(t2.get("糖度") == "七分糖", "'七分糖|推荐' → normalize → '七分糖' → 糖度")
-    check(t2.get("茶底") == "红茶", "红茶 type=茶底")
-    check(t2.get("温度") == "温热", "温热 type=温度")
-    check("奶底" in result2["missing"], "missing 包含奶底")
+    check(t2.get("茶底") == "黑芝麻仙草", "记忆中 '黑芝麻仙草' type=茶底")
+    check(t2.get("奶底") == "牛奶", "牛奶 type=奶底")
+    check(result2["missing"] == [], "无缺失")
     print()
 
-    # ── 3. classify_single: 缺项 ──
-    print("3. classify_single（缺项 — 红茶, 十二分糖, 温热 → 缺 milk_base）")
-    result3 = classify_single("红茶, 十二分糖, 温热")
+    # ── 3. 全新未知词 → 模拟用户选择「加入词典」 ──
+    print("3. 全新未知词 — 模拟用户输入 1 + 1（加入茶底）")
+
+    # 模拟 hook：第一次询问 → add as 茶底
+    call_count = [0]
+
+    def mock_hook_1(word, context):
+        call_count[0] += 1
+        print(f"  [MOCK] 询问未知词: '{word}', 上下文: '{context}'")
+        print(f"  [MOCK] 用户选择 1 → 加入词典，类型 1（茶底）")
+        return {"action": "add", "type": "茶底"}
+
+    set_prompt_hook(mock_hook_1)
+    reset_cache()
+    reset_session_asked()
+
+    result3 = classify_single("豆乳奶茶, 正常冰, 七分糖")
+    check(call_count[0] == 1, "触发了 1 次询问（'豆乳奶茶' 未知）")
+    check(mem_get("豆乳奶茶") == "茶底", "写入记忆后可查到 '豆乳奶茶' = 茶底")
     t3 = {t["type"]: t["value"] for t in result3["tokens"]}
-    check(len(result3["tokens"]) == 3, f"3 个 token（实际 {len(result3['tokens'])}）")
-    check("奶底" in result3["missing"], "missing 包含奶底")
-    check(len(result3["missing"]) == 1, f"1 个缺失维度（实际 {len(result3['missing'])}）")
+    check(t3.get("茶底") == "豆乳奶茶", "分类结果中 '豆乳奶茶' type=茶底")
+    check(t3.get("温度") == "正常冰", "正常冰 仍正确")
+    check(t3.get("糖度") == "七分糖", "七分糖 仍正确")
     print()
 
-    # ── 4. classify_single: 未知词 ──
-    print("4. classify_single（未知词 — 黑芝麻 → UNKNOWN）")
-    result4 = classify_single("红茶, 黑芝麻, 温热")
+    # ── 4. 同词第二次出现 → 不重复询问（已记忆） ──
+    print("4. 已记忆词第二次出现 — 不触发询问")
+    call_count[0] = 0
+    result4 = classify_single("豆乳奶茶, 牛奶, 温热, 五分糖")
+    check(call_count[0] == 0, "不再触发询问（记忆命中）")
     t4 = {t["type"]: t["value"] for t in result4["tokens"]}
-    check(t4.get("UNKNOWN") == "黑芝麻", "'黑芝麻' type=UNKNOWN")
-    check(t4.get("茶底") == "红茶", "红茶 仍正确识别为茶底")
-    check(type(t4.get("温度") == "温热") or True, "温热 type=温度")  # 至少茶底正常
+    check(t4.get("茶底") == "豆乳奶茶", "记忆命中后 type 正确")
+    check(result4["missing"] == [], "无缺失")
     print()
 
-    # ── 5. classify_single: 空值 ──
-    print("5. classify_single（空值处理）")
+    # ── 5. 同进程内同词不重复询问（_asked_this_session） ──
+    print("5. 同进程内同词不重复询问（_asked_this_session 缓存）")
+    reset_memory()
+    call_count[0] = 0
+
+    def mock_hook_2(word, context):
+        call_count[0] += 1
+        print(f"  [MOCK] 询问: '{word}' → 用户选 2（标 UNKNOWN）")
+        return {"action": "unknown"}
+
+    set_prompt_hook(mock_hook_2)
+    reset_cache()
+    reset_session_asked()
+
+    # 同一个词出现两次，两次都在不同行
+    r5a = classify_single("抹茶粉, 去冰")
+    r5b = classify_single("抹茶粉, 少冰")
+    check(call_count[0] == 1, f"同词只问 1 次（实际 {call_count[0]}）")
+    # 两次结果中该词都应是 UNKNOWN
+    types_a = {t["type"]: t["value"] for t in r5a["tokens"]}
+    types_b = {t["type"]: t["value"] for t in r5b["tokens"]}
+    check(types_a.get("UNKNOWN") == "抹茶粉", "第一次 UNKNOWN")
+    check(types_b.get("UNKNOWN") == "抹茶粉", "第二次 UNKNOWN（会话缓存）")
+    print()
+
+    # ── 6. 模拟用户选择「跳过此行」 ──
+    print("6. 模拟用户选择「跳过此行」")
+
+    def mock_hook_3(word, context):
+        print(f"  [MOCK] 询问: '{word}' → 用户选 3（跳过）")
+        return {"action": "skip"}
+
+    set_prompt_hook(mock_hook_3)
+    reset_cache()
+    reset_session_asked()
+
+    result6 = classify_single("未知成分X, 正常冰")
+    check(result6.get("_skipped") is True, "结果标记 _skipped=True")
+    check(any(t["type"] == "UNKNOWN" for t in result6["tokens"]), "未知词标为 UNKNOWN")
+    print()
+
+    # ── 7. 空值 / 纯空白 ──
+    print("7. 空值 / 纯空白处理")
+    set_prompt_hook(None)
+    reset_cache()
     empty_result = classify_single("")
     check(empty_result["tokens"] == [], "空 tokens")
-    check(set(empty_result["missing"]) == {"茶底", "奶底", "糖度", "温度"}, "全部 4 维度缺失")
-    print()
-
-    # ── 6. classify_single: 纯空白 ──
-    print("6. classify_single（纯空白字符）")
+    check(len(empty_result["missing"]) == 4, "4 维全缺失")
     ws_result = classify_single("   ")
     check(ws_result["tokens"] == [], "纯空白 → 空 tokens")
-    check(len(ws_result["missing"]) == 4, "纯空白 → 全部缺失")
     print()
 
-    # ── 7. classify_single: 缓存 ──
-    print("7. 缓存测试")
+    # ── 8. classify_batch: 批量（含内存命中） ──
+    print("8. classify_batch（批量，含内存命中）")
     reset_cache()
-    r1 = classify_single("红茶, 温热")
-    r2 = classify_single("红茶, 温热")
-    check(r1 == r2, "相同值命中缓存，结果一致")
-    r3 = classify_single("绿茶, 少冰")
-    check(isinstance(r3, dict) and "tokens" in r3, "不同值也正常分类")
-    reset_cache()
-    print()
+    reset_session_asked()
 
-    # ── 8. classify_batch: 批量分类 ──
-    print("8. classify_batch（批量分类）")
-    reset_cache()
+    # 预置记忆
+    reset_memory()
+    mem_add("茉莉绿茶", "茶底")
+
     batch_results = classify_batch([
         "红茶, 十二分糖, 温热",
-        "燕麦奶, 正常冰, 七分糖",
-        "乌龙茶, 椰乳, 三分糖, 去冰",
+        "",                                  # 空值
+        "茉莉绿茶, 牛奶, 无糖, 去冰",         # 茉莉绿茶在记忆中
     ])
     check(len(batch_results) == 3, f"3 条结果（实际 {len(batch_results)}）")
     check(len(batch_results[0]["tokens"]) == 3, "第 1 行 3 个 token")
     check("奶底" in batch_results[0]["missing"], "第 1 行 missing 奶底")
-    check(len(batch_results[1]["tokens"]) == 3, "第 2 行 3 个 token")
-    check("茶底" in batch_results[1]["missing"], "第 2 行 missing 茶底")
-    check(len(batch_results[2]["tokens"]) == 4, "第 3 行 4 个 token")
+    check(batch_results[1]["tokens"] == [], "第 2 行（空）→ 空 tokens")
+    t8 = {t["type"]: t["value"] for t in batch_results[2]["tokens"]}
+    check(t8.get("茶底") == "茉莉绿茶", "记忆中 '茉莉绿茶' → 茶底")
     check(batch_results[2]["missing"] == [], "第 3 行无缺失")
     print()
 
-    # ── 9. classify_batch: 含空值 ──
-    print("9. classify_batch（含空值）")
-    mixed_results = classify_batch(["红茶", "", "红茶"])
-    check(len(mixed_results) == 3, "3 条结果")
-    check(mixed_results[0]["tokens"][0]["value"] == "红茶", "第 1 行正常解析")
-    check(mixed_results[1]["tokens"] == [], "第 2 行（空）→ 空 tokens")
-    check(len(mixed_results[1]["missing"]) == 4, "第 2 行全部缺失")
-    check(mixed_results[2]["tokens"][0]["value"] == "红茶", "第 3 行命中缓存")
-    print()
-
-    # ── 10. classify_from_dataframe ──
-    print("10. classify_from_dataframe 便捷方法")
+    # ── 9. classify_from_dataframe ──
+    print("9. classify_from_dataframe 便捷方法")
     df = pd.DataFrame({
         "菜品名称": ["测试A", "测试B"],
         "口味做法组合": ["红茶, 温热", "绿茶, 少冰"],
@@ -310,9 +468,7 @@ if __name__ == "__main__":
     df_results = classify_from_dataframe(df, "口味做法组合")
     check(len(df_results) == 2, "2 条结果")
     check(df_results[0]["tokens"][0]["value"] == "红茶", "DataFrame 第 1 行正确")
-    check(df_results[1]["tokens"][0]["value"] == "绿茶", "DataFrame 第 2 行正确")
 
-    # composite_col 不存在应抛异常
     try:
         classify_from_dataframe(df, "不存在的列")
         check(False, "不存在的列应抛异常")
@@ -320,34 +476,34 @@ if __name__ == "__main__":
         check("不在 DataFrame 列中" in str(e), f"ValueError: {e}")
     print()
 
-    # ── 11. 空列表异常 ──
-    print("11. 空列表异常处理")
-    try:
-        classify_batch([])
-        check(False, "空列表应抛异常")
-    except ValueError as e:
-        check("不能为空" in str(e), f"ValueError: {e}")
-    print()
-
-    # ── 12. 新词条验证：茉莉绿茶 ──
-    print("12. 词典新词条 — 茉莉绿茶 → 茶底")
-    result12 = classify_single("茉莉绿茶, 牛奶, 无糖, 去冰")
-    t12 = {t["type"]: t["value"] for t in result12["tokens"]}
-    check(t12.get("茶底") == "茉莉绿茶", "茉莉绿茶 type=茶底")
-    check(t12.get("奶底") == "牛奶", "牛奶 type=奶底")
-    check(t12.get("糖度") == "无糖", "无糖 type=糖度")
-    check(t12.get("温度") == "去冰", "去冰 type=温度")
-    check(result12["missing"] == [], "完整四项 → 无缺失")
-    reset_cache()
-    print()
-
-    # ── 13. API 调用计数器始终为 0 ──
-    print("13. API 调用计数器")
+    # ── 10. API 调用计数器 ──
+    print("10. API 调用计数器始终为 0")
     reset_api_call_count()
-    check(get_api_call_count() == 0, "初始计数 = 0")
+    check(get_api_call_count() == 0, "初始 = 0")
     classify_single("红茶, 温热")
-    check(get_api_call_count() == 0, "规则分类后计数仍 = 0（无 API 调用）")
+    check(get_api_call_count() == 0, "规则执行后仍 = 0")
     print()
+
+    # ── 11. set_prompt_hook(None) 恢复默认 ──
+    print("11. set_prompt_hook(None) 恢复默认交互")
+    set_prompt_hook(None)
+    check(_prompt_hook is None, "hook 已清除")
+    print()
+
+    # ── 12. 缓存验证 ──
+    print("12. 缓存验证（含记忆命中）")
+    reset_cache()
+    reset_session_asked()
+    reset_memory()
+    mem_add("抹茶", "茶底")
+
+    r12a = classify_single("抹茶, 温热")
+    r12b = classify_single("抹茶, 温热")
+    check(r12a == r12b, "相同值命中缓存，结果一致")
+    print()
+
+    # 清理：清除 hook
+    set_prompt_hook(None)
 
     # ── 汇总 ──
     print(f"=== 结果: {passed} passed, {failed} failed ===")

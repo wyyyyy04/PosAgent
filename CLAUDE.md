@@ -27,6 +27,11 @@ git push origin master
 - 文件底部的 `if __name__ == "__main__"` 自测，使用真实示例数据
 - README.md 进度表更新：状态、自测结果、commit 信息（版本号）
 
+## 长期记忆
+
+长期记忆存储于 `~/.pos_agent/memory.json`，不入 git，是用户本地数据。
+`/memory` 指令和运行时未知词确认共用同一存储。
+
 ## 关键约束（不可违反）
 - LLM 只在初始化阶段调用，不在逐行匹配中调用
 - 商品名匹配禁止使用 Embedding
