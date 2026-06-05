@@ -375,7 +375,7 @@ cat mapping_report.txt
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 23/23 passed | LLM 字段语义分析、字段映射配置、结果缓存、Mock 模式 | `afa16df` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
-| 长期记忆 | data/memory.py | ✅ 已完成 | 23/23 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、/memory 指令共用 | _待提交_ |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 23/23 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、/memory 指令共用 | `5649150` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
 | CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
