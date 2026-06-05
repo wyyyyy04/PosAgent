@@ -192,6 +192,64 @@ def add_match_correction(entry: Dict[str, Any]) -> None:
     _save()
 
 
+def delete_token(word: str) -> bool:
+    """删除指定的 token 别名。
+
+    Args:
+        word: 要删除的 token 文本。
+
+    Returns:
+        True 如果词条存在并被删除，False 如果词条不存在。
+    """
+    global _dirty
+    data = _load()
+    aliases = data.get("token_aliases", {})
+    if word in aliases:
+        del aliases[word]
+        _dirty = True
+        _save()
+        return True
+    return False
+
+
+def delete_template_rule(fingerprint_prefix: str) -> Optional[str]:
+    """根据指纹前缀删除模板规则缓存。
+
+    支持模糊匹配：只要 rule 的 fingerprint 以给定前缀开头即匹配。
+    若前缀匹配到多个规则，不删除任何规则，返回 None。
+
+    Args:
+        fingerprint_prefix: 指纹前缀（至少 1 个字符）。
+
+    Returns:
+        被删除的完整 fingerprint，或 None（未匹配或多重匹配）。
+    """
+    global _dirty
+    data = _load()
+    rules = data.get("template_rules", {})
+    matches = [fp for fp in rules if fp.startswith(fingerprint_prefix)]
+    if len(matches) == 1:
+        del rules[matches[0]]
+        _dirty = True
+        _save()
+        return matches[0]
+    return None
+
+
+def get_stats() -> Dict[str, int]:
+    """返回记忆数据的统计信息（供 /memory reset 确认提示使用）。
+
+    Returns:
+        {"aliases": N, "templates": M, "corrections": K}
+    """
+    data = _load()
+    return {
+        "aliases": len(data.get("token_aliases", {})),
+        "templates": len(data.get("template_rules", {})),
+        "corrections": len(data.get("match_corrections", [])),
+    }
+
+
 def get_memory_path() -> str:
     """返回记忆文件路径（供 /memory 指令显示）。"""
     return _MEMORY_PATH

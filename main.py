@@ -308,5 +308,9 @@ if __name__ == "__main__":
         reset_cache()
 
         print(f"=== 结果: {passed} passed, {failed} failed ===")
+    elif len(sys.argv) <= 1:
+        # 无参数：进入交互 REPL 模式
+        from cli.repl import repl_loop
+        repl_loop()
     else:
         sys.exit(run())
