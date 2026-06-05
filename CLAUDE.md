@@ -18,7 +18,7 @@ git push origin master
 ```bash
 git add README.md
 git commit -m "docs: 更新开发进度，<模块名> 完成"
-git push origin origin master
+git push origin master
 ```
 
 ## 模块完成标准
