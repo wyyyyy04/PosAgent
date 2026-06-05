@@ -13,7 +13,9 @@ _RAW_TOKENS: Dict[str, List[str]] = {
     "糖度": ["全糖", "十二分糖", "标准糖", "七分糖", "五分糖", "三分糖", "不另加糖", "无糖"],
     "奶底": ["牛奶", "燕麦奶", "厚乳", "椰乳"],
     "规格": ["大杯", "中杯", "小杯", "五角瓶"],
-    "茶底": ["红茶", "绿茶", "乌龙茶", "五角排红茶", "五黄标准茶"],
+    "茶底": ["红茶", "绿茶", "乌龙茶", "五角排红茶", "五黄标准茶",
+              # 以下来自 testdata/待匹配数据表.xlsx 真实数据扫描补充
+              "茉莉绿茶"],  # 2026-06-05: testdata 口味做法组合中出现
 }
 
 # ── 已知后缀模式（文档备忘）──────────────────────────────────
@@ -197,7 +199,7 @@ if __name__ == "__main__":
     check(len(size_tokens) == 4, f"规格 包含 4 个词（实际 {len(size_tokens)}）")
 
     tea_tokens = get_tokens_by_type("茶底")
-    check(len(tea_tokens) == 4, f"茶底 包含 4 个词（实际 {len(tea_tokens)}）")
+    check(len(tea_tokens) == 6, f"茶底 包含 6 个词（实际 {len(tea_tokens)}）")
 
     unknown_tokens = get_tokens_by_type("不存在的类型")
     check(unknown_tokens == [], "不存在的类型 → 空列表")
