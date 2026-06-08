@@ -22,8 +22,11 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             )
     return df
 
-# 主数据表必要字段（SOP 为目标列，允许缺失）
-MASTER_REQUIRED_COLUMNS = ["品名", "杯型", "奶底", "做法", "糖"]
+# 主数据表必要字段（缺一不可，SOP 为目标列允许缺失）
+MASTER_REQUIRED_COLUMNS = ["品名", "杯型", "做法", "糖"]
+
+# 主数据表可通配字段（缺失时自动注入空列，触发通配逻辑，不报错）
+MASTER_WILDCARD_COLUMNS = ["奶底"]
 
 # 主数据表可选字段（存在则保留）
 MASTER_OPTIONAL_COLUMNS = ["全信息", "SOP"]
@@ -61,7 +64,8 @@ def read_excel(filepath: str, sheet_name=0) -> pd.DataFrame:
 def read_master(filepath: str, sheet_name=0) -> pd.DataFrame:
     """读取主数据表，校验必要字段。
 
-    必要字段: 品名, 杯型, 奶底, 做法, 糖
+    必要字段: 品名, 杯型, 做法, 糖（缺一报错）
+    可通配字段: 奶底（缺失时自动注入空列，触发通配逻辑）
     可选字段: 全信息, SOP
 
     Args:
@@ -76,12 +80,19 @@ def read_master(filepath: str, sheet_name=0) -> pd.DataFrame:
     """
     df = read_excel(filepath, sheet_name=sheet_name)
 
-    missing = [c for c in MASTER_REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
+    # ── 检测必要字段 ──
+    missing_required = [c for c in MASTER_REQUIRED_COLUMNS if c not in df.columns]
+    if missing_required:
         raise ValueError(
-            f"主数据表缺少必要字段: {missing}\n"
+            f"主数据表缺少必要字段: {missing_required}\n"
             f"当前列名: {list(df.columns)}"
         )
+
+    # ── 检测可通配字段：缺失时注入空列 ──
+    for col in MASTER_WILDCARD_COLUMNS:
+        if col not in df.columns:
+            print(f"[INFO] 主数据表未检测到「{col}」列，该维度将作为通配符处理")
+            df[col] = None
 
     return df
 
@@ -226,10 +237,43 @@ if __name__ == "__main__":
         check("品名" in df_strip.columns and " 品名 " not in df_strip.columns, "列名空白已去除")
         print()
 
+        # ── 7. 缺可通配字段（奶底）→ 自动注入空列 ──
+        print("7. 缺可通配字段（奶底）→ 自动注入空列")
+        no_milk_path = os.path.join(tmpdir, "no_milk_master.xlsx")
+        pd.DataFrame({
+            "品名": ["测试商品"],
+            "杯型": ["中杯"],
+            "做法": ["少冰"],
+            "糖":   ["七分糖"],
+        }).to_excel(no_milk_path, index=False)
+        df_no_milk = read_master(no_milk_path)
+        check("奶底" in df_no_milk.columns, "奶底 列被自动注入")
+        check(df_no_milk["奶底"].isna().all(), "注入的奶底列全部为 None")
+        check(df_no_milk.iloc[0]["品名"] == "测试商品", "其他列正常")
+        print()
+
+        # ── 8. 缺必要字段（做法）→ 仍抛异常 ──
+        print("8. 缺必要字段（做法）→ 仍抛异常")
+        bad_required_path = os.path.join(tmpdir, "bad_required.xlsx")
+        pd.DataFrame({
+            "品名": ["测试"],
+            "杯型": ["中杯"],
+            "奶底": ["牛奶"],
+            "糖":   ["七分糖"],
+        }).to_excel(bad_required_path, index=False)
+        try:
+            read_master(bad_required_path)
+            check(False, "缺做法应抛 ValueError")
+        except ValueError as e:
+            check("做法" in str(e), f"报错信息包含「做法」（实际: {e}）")
+        print()
+
     finally:
         for f in [master_path, template_path, empty_path, multi_sheet_path,
                   os.path.join(tmpdir, "bad_master.xlsx"),
-                  os.path.join(tmpdir, "strip.xlsx")]:
+                  os.path.join(tmpdir, "strip.xlsx"),
+                  os.path.join(tmpdir, "no_milk_master.xlsx"),
+                  os.path.join(tmpdir, "bad_required.xlsx")]:
             if os.path.exists(f):
                 os.remove(f)
         os.rmdir(tmpdir)
