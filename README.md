@@ -415,7 +415,7 @@ REPL 内支持以下斜杠指令：
 | Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，28 个 Token；normalize_token() 四级优先级清洗；testdata 真数据补全茉莉绿茶 | `d2de102` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
-| Rule Engine | agent/rule_engine.py | ✅ 已完成 | 51/51 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；集成 normalize_token 三处调用 | `205ce26` |
+| Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
 | 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
@@ -472,3 +472,10 @@ REPL 内支持以下斜杠指令：
 - **类型映射**：支持中英文类型名（tea_base↔茶底、milk_base↔奶底等）
 - **安全机制**：删除/清空操作需确认（delete: y/n, reset: yes/不可撤销）
 - **REPL 内 /run**：复用 main.run()，无需退出即可执行映射任务
+
+### 主数据缺列自动通配（本轮 `6679745`）
+- **改动**：`master_to_canonical()` 读取主数据后检测实际存在的列
+- **WILDCARD_DIMENSIONS**（奶底/茶底）列不存在：打印 `[INFO]` 日志，全行设 None 触发通配，不报错不交互
+- **REQUIRED_DIMENSIONS**（规格/做法/糖）列不存在：抛出 `ValueError`，这是真正的数据问题
+- **matching_engine 无需修改**：已有 `_empty(m_val)` → 通配分支，列不存在时 `m_val` 为 None 直接命中
+- **自测更新**：新增 22 个边界 case（73/73 passed）
