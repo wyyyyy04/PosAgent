@@ -26,6 +26,9 @@ MASTER_COLUMN_MAP = {
 # 可通配的维度：主数据中为空的维度可匹配任意值
 WILDCARD_DIMENSIONS = {"milk_base", "tea_base"}
 
+# 必要维度：匹配时必须有值，缺列直接报错
+REQUIRED_DIMENSIONS = {"size", "temperature", "sugar"}
+
 # Token 中文类型名 → Canonical 字段名
 TOKEN_TYPE_TO_FIELD = {
     "温度": "temperature",
@@ -55,16 +58,41 @@ def master_to_canonical(master_df: pd.DataFrame) -> List[Dict[str, Any]]:
     主数据表字段名固定为中文（品名/杯型/奶底/做法/糖），
     映射为 product_name / size / milk_base / temperature / sugar。
 
+    主数据表缺少奶底或茶底列时，自动将该维度设为全行通配（None），
+    不报错、不退出、不触发交互。缺少规格/做法/糖列时抛出 ValueError。
+
     Args:
-        master_df: 主数据 DataFrame，须含 品名/杯型/奶底/做法/糖 列。
+        master_df: 主数据 DataFrame。
 
     Returns:
         canonical_rows: 每行一个 dict，包含 canonical 字段 + sop（若有）。
+
+    Raises:
+        ValueError: 缺少 REQUIRED_DIMENSIONS 对应的列时抛出。
     """
+    existing_cols = set(master_df.columns)
+
+    # ── 检测通配维度列是否缺失 ──
+    for cn_col, en_col in MASTER_COLUMN_MAP.items():
+        if en_col in WILDCARD_DIMENSIONS and cn_col not in existing_cols:
+            print(f"[INFO] 主数据表未检测到「{cn_col}」列，该维度将作为通配符处理")
+
+    # ── 检测必要维度列是否缺失 ──
+    for cn_col, en_col in MASTER_COLUMN_MAP.items():
+        if en_col in REQUIRED_DIMENSIONS and cn_col not in existing_cols:
+            raise ValueError(
+                f"主数据表缺少必要列「{cn_col}」（对应维度: {en_col}），"
+                f"请检查主数据表是否完整"
+            )
+
     rows = []
     for _, row in master_df.iterrows():
         cr = {f: None for f in CANONICAL_FIELDS}
         for cn_col, en_col in MASTER_COLUMN_MAP.items():
+            if cn_col not in existing_cols:
+                # 列不存在 → 通配维度强制 None，必要维度已在上面报错不会到这里
+                cr[en_col] = None
+                continue
             val = row.get(cn_col)
             if _empty(val):
                 # 奶底和茶底允许空值（通配），其余维度保留 None 以便后续检测
@@ -193,8 +221,7 @@ def check_row_completeness(canonical_row: Dict[str, Any]) -> List[str]:
     Returns:
         缺失的必要维度列表。
     """
-    required = ["size", "temperature", "sugar"]
-    return [f for f in required if canonical_row.get(f) is None]
+    return [f for f in REQUIRED_DIMENSIONS if canonical_row.get(f) is None]
 
 
 # ── 自测 ──────────────────────────────────────────────────────
@@ -265,6 +292,85 @@ if __name__ == "__main__":
     # 无后缀的不受影响
     check(ms[0]["milk_base"] == "牛奶", "无后缀 milk_base 保持不变")
     check(ms[0]["product_name"] == "浅浅清茶", "无后缀 product_name 保持不变")
+    print()
+
+    # ── 3c. master_to_canonical: 缺奶底列 → 自动通配 ──
+    print("3c. master_to_canonical（缺奶底列 → 自动通配）")
+    master_no_milk = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "做法": "少冰", "糖": "七分糖", "SOP": "T240"},
+        {"品名": "黑糖波波", "杯型": "大杯", "做法": "正常冰", "糖": "全糖", "SOP": "T180"},
+    ])
+    m_no_milk = master_to_canonical(master_no_milk)
+    check(len(m_no_milk) == 2, f"2 行 → {len(m_no_milk)} 行")
+    check(m_no_milk[0]["milk_base"] is None, "缺奶底列 → 奶底全行 None（通配）")
+    check(m_no_milk[1]["milk_base"] is None, "第2行奶底也为 None")
+    check(m_no_milk[0]["product_name"] == "浅浅清茶", "品名正常")
+    check(m_no_milk[0]["size"] == "中杯", "杯型正常")
+    check(m_no_milk[0]["temperature"] == "少冰", "做法正常")
+    check(m_no_milk[0]["sugar"] == "七分糖", "糖正常")
+    check(m_no_milk[0]["sop"] == "T240", "SOP 正常")
+    print()
+
+    # ── 3d. master_to_canonical: 缺茶底列 → 自动通配 ──
+    print("3d. master_to_canonical（缺茶底列 → 自动通配）")
+    master_no_tea = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "奶底": "牛奶", "做法": "少冰", "糖": "七分糖"},
+    ])
+    m_no_tea = master_to_canonical(master_no_tea)
+    check(m_no_tea[0]["tea_base"] is None, "缺茶底列 → 茶底全行 None（通配）")
+    check(m_no_tea[0]["milk_base"] == "牛奶", "奶底正常")
+    check(m_no_tea[0]["product_name"] == "浅浅清茶", "品名正常")
+    print()
+
+    # ── 3e. master_to_canonical: 同时缺奶底和茶底列 → 自动通配 ──
+    print("3e. master_to_canonical（同时缺奶底+茶底列 → 自动通配）")
+    master_no_both = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "做法": "少冰", "糖": "七分糖"},
+    ])
+    m_no_both = master_to_canonical(master_no_both)
+    check(m_no_both[0]["milk_base"] is None, "奶底 None（通配）")
+    check(m_no_both[0]["tea_base"] is None, "茶底 None（通配）")
+    check(m_no_both[0]["product_name"] == "浅浅清茶", "品名正常")
+    check(m_no_both[0]["size"] == "中杯", "杯型正常")
+    print()
+
+    # ── 3f. master_to_canonical: 缺必要维度列（做法/temperature）→ 报错 ──
+    print("3f. master_to_canonical（缺必要维度列 → 报错）")
+    master_no_temp = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "奶底": "牛奶", "糖": "七分糖"},
+    ])
+    error_raised = False
+    try:
+        master_to_canonical(master_no_temp)
+    except ValueError as e:
+        error_raised = True
+        check("做法" in str(e), f"报错信息包含「做法」（实际: {e}）")
+        check("temperature" in str(e), f"报错信息包含 temperature（实际: {e}）")
+    check(error_raised, "缺做法列应抛出 ValueError")
+
+    # 缺糖列
+    master_no_sugar = pd.DataFrame([
+        {"品名": "浅浅清茶", "杯型": "中杯", "奶底": "牛奶", "做法": "少冰"},
+    ])
+    error_raised2 = False
+    try:
+        master_to_canonical(master_no_sugar)
+    except ValueError as e:
+        error_raised2 = True
+        check("糖" in str(e), f"报错信息包含「糖」（实际: {e}）")
+    check(error_raised2, "缺糖列应抛出 ValueError")
+
+    # 缺杯型列
+    master_no_size = pd.DataFrame([
+        {"品名": "浅浅清茶", "奶底": "牛奶", "做法": "少冰", "糖": "七分糖"},
+    ])
+    error_raised3 = False
+    try:
+        master_to_canonical(master_no_size)
+    except ValueError as e:
+        error_raised3 = True
+        check("杯型" in str(e), f"报错信息包含「杯型」（实际: {e}）")
+    check(error_raised3, "缺杯型列应抛出 ValueError")
     print()
 
     # ── 4. template_to_canonical ──
