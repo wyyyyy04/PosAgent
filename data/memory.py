@@ -72,7 +72,7 @@ def _load() -> Dict[str, Any]:
     else:
         _data = _default_structure()
 
-    # 确保顶层键存在
+    # 确保顶层键存在（兼容旧版 memory.json 缺少新增键）
     for key, default in _default_structure().items():
         if key not in _data:
             _data[key] = default
@@ -86,6 +86,7 @@ def _default_structure() -> Dict[str, Any]:
         "token_aliases": {},
         "template_rules": {},
         "match_corrections": [],
+        "column_aliases": {},
     }
 
 
@@ -172,6 +173,52 @@ def list_aliases() -> Dict[str, Dict[str, str]]:
     """
     data = _load()
     return dict(data.get("token_aliases", {}))
+
+
+def get_column_alias(col_name: str) -> Optional[str]:
+    """查询列别名表，返回列名对应的 canonical 字段或特殊标记。
+
+    特殊标记：'ignore' 表示忽略此列。
+
+    Args:
+        col_name: 原始列名。
+
+    Returns:
+        canonical 字段名（如 "product_name"）、特殊标记（"ignore"）或 None。
+    """
+    data = _load()
+    entry = data.get("column_aliases", {}).get(col_name)
+    if entry and isinstance(entry, dict):
+        return entry.get("field")
+    return None
+
+
+def add_column_alias(col_name: str, canonical_field: str) -> None:
+    """将列名 → canonical 字段映射写入别名表并持久化。
+
+    Args:
+        col_name: 原始列名。
+        canonical_field: canonical 字段名或特殊标记（"ignore"）。
+    """
+    global _dirty
+    data = _load()
+    today = date.today().isoformat()
+    data.setdefault("column_aliases", {})[col_name] = {
+        "field": canonical_field,
+        "added": today,
+    }
+    _dirty = True
+    _save()
+
+
+def list_column_aliases() -> Dict[str, Dict[str, str]]:
+    """返回所有已记录的列别名映射。
+
+    Returns:
+        {col_name: {"field": "product_name", "added": "2025-06-05"}, ...}
+    """
+    data = _load()
+    return dict(data.get("column_aliases", {}))
 
 
 def get_template_rules() -> Dict[str, Any]:
@@ -290,6 +337,7 @@ def get_stats() -> Dict[str, int]:
         "aliases": len(data.get("token_aliases", {})),
         "templates": len(data.get("template_rules", {})),
         "corrections": len(data.get("match_corrections", [])),
+        "column_aliases": len(data.get("column_aliases", {})),
     }
 
 
@@ -476,6 +524,36 @@ if __name__ == "__main__":
     check(("词B", "奶底") in new_tokens, "词B→奶底 在列表中")
     reset_new_tokens()
     check(len(get_new_tokens()) == 0, "reset 后清空")
+    print()
+
+    # ── 13. column_aliases 读写 ──
+    print("13. column_aliases 读写")
+    check(get_column_alias("菜品名称") is None, "初始无此列别名")
+    add_column_alias("菜品名称", "product_name")
+    check(get_column_alias("菜品名称") == "product_name", "写入后可查到")
+    add_column_alias("备注", "ignore")
+    check(get_column_alias("备注") == "ignore", "ignore 标记可写入")
+    # list
+    col_aliases = list_column_aliases()
+    check(len(col_aliases) == 2, f"2 条列别名（实际 {len(col_aliases)}）")
+    check(col_aliases["菜品名称"]["field"] == "product_name", "条目结构含 field")
+    check("added" in col_aliases["菜品名称"], "条目结构含 added")
+    # 持久化
+    reload()
+    check(get_column_alias("菜品名称") == "product_name", "reload 后仍存在")
+    check(get_column_alias("备注") == "ignore", "reload 后 ignore 仍存在")
+    # reset 清空
+    reset_memory()
+    check(get_column_alias("菜品名称") is None, "reset 后清空")
+    print()
+
+    # ── 14. get_stats 包含 column_aliases ──
+    print("14. get_stats 包含 column_aliases")
+    reset_memory()
+    add_column_alias("A", "product_name")
+    add_column_alias("B", "size")
+    stats = get_stats()
+    check(stats.get("column_aliases") == 2, f"stats 含 column_aliases=2（实际 {stats}）")
     print()
 
     # ── 还原原始记忆数据 ──

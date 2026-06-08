@@ -72,6 +72,101 @@ class CLIError(Exception):
     """CLI 可恢复错误，run() 捕获后返回 exit_code=1。"""
 
 
+# ── 列分类交互选项 ─────────────────────────────────────────────────
+
+FIELD_OPTIONS = [
+    ("product_name", "商品名"),
+    ("size",         "规格"),
+    ("milk_base",    "奶底"),
+    ("temperature",  "温度/做法"),
+    ("sugar",        "糖度"),
+    ("tea_base",     "茶底"),
+    ("composite_col","口味做法组合"),
+    ("sop",          "配料/SOP代码"),
+    ("ignore",       "忽略此列"),
+]
+
+# 交互 hook（用于测试时注入自定义回调）
+_column_prompt_hook = None
+
+
+def set_column_prompt_hook(hook) -> None:
+    """注入自定义列分类回调（用于自动化测试）。
+    设为 None 恢复默认交互式行为。
+    """
+    global _column_prompt_hook
+    _column_prompt_hook = hook
+
+
+def _interactive_classify_columns(
+    unrecognized_cols: list,
+    template_df: "pd.DataFrame",
+    schema_result: dict,
+) -> None:
+    """交互式引导用户手动分类未识别列。
+
+    对每个未识别列展示列名 + 样例值，用户选择 canonical 字段映射。
+    选择结果写入 column_aliases 长期记忆和当前 schema_result。
+
+    Args:
+        unrecognized_cols: 未识别的列名列表。
+        template_df: 模板 DataFrame（用于提取样例值）。
+        schema_result: 当前 schema 分析结果（原地修改）。
+    """
+    import pandas as pd
+    from data.memory import add_column_alias
+
+    for col in unrecognized_cols:
+        # 提取样例值
+        sample_vals = (
+            template_df[col].dropna().astype(str).unique()[:3]
+            if col in template_df.columns else []
+        )
+        sample_str = ", ".join(sample_vals) if len(sample_vals) > 0 else "(空)"
+
+        if _column_prompt_hook is not None:
+            # 测试模式：使用注入的回调
+            field_name = _column_prompt_hook(col, sample_str)
+        else:
+            # 交互模式
+            print(f"\n[Schema] 发现未能识别的列：「{col}」")
+            print(f"  样例值：{sample_str}")
+            for i, (field, label) in enumerate(FIELD_OPTIONS, 1):
+                print(f"  [{i}] {field}（{label}）")
+
+            while True:
+                try:
+                    choice = int(input("  请选择: ").strip()) - 1
+                    if 0 <= choice < len(FIELD_OPTIONS):
+                        field_name, _ = FIELD_OPTIONS[choice]
+                        break
+                    print(f"  [错误] 请输入 1-{len(FIELD_OPTIONS)} 之间的数字")
+                except (ValueError, EOFError):
+                    print(f"  [错误] 请输入有效数字")
+
+        # 持久化列别名
+        add_column_alias(col, field_name)
+
+        # 应用到当前结果
+        if field_name == "ignore":
+            schema_result["irrelevant_cols"].append(col)
+        elif field_name == "composite_col":
+            if schema_result.get("composite_col") is None:
+                schema_result["composite_col"] = col
+            else:
+                # 已有复合列，当作普通 field_mapping
+                schema_result["field_mapping"][col] = field_name
+        elif field_name == "sop":
+            if schema_result.get("target_col") is None:
+                schema_result["target_col"] = col
+            else:
+                schema_result["field_mapping"][col] = field_name
+        else:
+            schema_result["field_mapping"][col] = field_name
+
+    schema_result["unrecognized_cols"] = []
+
+
 def _validate_file(path: str, label: str) -> None:
     """验证输入文件存在，失败时抛 CLIError（不直接 sys.exit）。"""
     if not os.path.exists(path):
@@ -172,11 +267,43 @@ def run(args: Optional[list] = None) -> int:
     print(f"  报告:     {report_path}")
     print("-" * 56)
 
-    # 运行管线
     import config as _cfg
     llm_mode = "MOCK" if _cfg.USE_MOCK_LLM else "REAL"
     print(f"  LLM 模式: {llm_mode} (模型: {_cfg.DEEPSEEK_MODEL})")
 
+    # ── Schema 预分析 + 交互兜底 ──
+    from agent.schema_analyzer import (
+        _template_fingerprint,
+        analyze_from_dataframe,
+    )
+    from data.memory import (
+        get_template_rule as mem_get_template_rule,
+        save_template_rule as mem_save_template_rule,
+    )
+    from excel_io.excel_reader import read_template
+
+    # 预加载模板表（仅用于 Schema 分析，不影响管线内部的独立加载）
+    preload_df = read_template(opts.template, sheet_name=template_sheet)
+    fingerprint = _template_fingerprint(list(preload_df.columns))
+
+    # 先查指纹缓存（完整结果，可直接跳过 LLM + 交互）
+    cached_schema = mem_get_template_rule(fingerprint)
+    if cached_schema is not None:
+        print(f"[Schema] 模板指纹缓存命中 {fingerprint[:12]}...（跳过 Schema 分析）")
+    else:
+        # 调用 Schema Analyzer（含 LLM + 列别名注入）
+        schema_result = analyze_from_dataframe(preload_df)
+
+        unrecognized = schema_result.get("unrecognized_cols", [])
+        if unrecognized:
+            print(f"[Schema] LLM 未能识别 {len(unrecognized)} 个列: {unrecognized}")
+            _interactive_classify_columns(unrecognized, preload_df, schema_result)
+            # 将完整结果写入指纹缓存（下次直接命中，跳过 LLM + 交互）
+            mem_save_template_rule(fingerprint, schema_result)
+            print(f"[Schema] 完整结果已写入模板指纹缓存 {fingerprint[:12]}...")
+        # 如果 unrecognized 为空，analyze() 内部已写入缓存
+
+    # 运行管线
     t0 = time.time()
     state = run_pipeline(
         master_path=opts.master,
@@ -447,13 +574,124 @@ if __name__ == "__main__":
             check(True, "管线错误处理在 workflow 自测中完整覆盖")
             print()
 
+            # ── 8. 交互式列分类（Mock hook）──
+            print("8. 交互式列分类（_interactive_classify_columns）")
+            from data.memory import (
+                reset_memory as mem_reset,
+                get_column_alias as mem_get_col,
+            )
+            mem_reset()
+
+            # 准备有未识别列的模板
+            df_interactive = pd.DataFrame({
+                "菜品名称": ["测试商品"],
+                "原料类型": ["红茶"],
+                "规格": ["中杯"],
+                "配料": [""],
+                "备注": [""],
+            })
+            interactive_path = os.path.join(tmpdir, "interactive.xlsx")
+            df_interactive.to_excel(interactive_path, index=False)
+            interactive_out = os.path.join(tmpdir, "interactive_out.xlsx")
+
+            # Mock hook: 模拟用户选择
+            hook_calls = []
+
+            def mock_column_hook(col, sample):
+                hook_calls.append((col, sample))
+                # "原料类型" → tea_base, "备注" → ignore
+                mapping = {"原料类型": "tea_base", "备注": "ignore"}
+                if col in mapping:
+                    return mapping[col]
+                return "ignore"
+
+            set_column_prompt_hook(mock_column_hook)
+
+            # 用 Mock 覆盖 schema 响应，使"原料类型"和"备注"不被识别
+            import config as cfg_inner
+            orig_schema = dict(cfg_inner.MOCK_SCHEMA_RESPONSE)
+            cfg_inner.MOCK_SCHEMA_RESPONSE = {
+                "field_mapping": {"菜品名称": "product_name", "规格": "size"},
+                "composite_col": None,
+                "target_col": "配料",
+                "irrelevant_cols": [],
+            }
+
+            exit_code8 = run([
+                "-m", master_path,
+                "-t", interactive_path,
+                "-o", interactive_out,
+            ])
+            check(exit_code8 == 0, f"交互分类后正常执行（实际 {exit_code8}）")
+            # 验证 hook 被调用（"原料类型"和"备注"都未在 Mock 中 → 应触发）
+            called_cols = {c for c, _ in hook_calls}
+            check("原料类型" in called_cols, "「原料类型」触发交互")
+            check("备注" in called_cols, "「备注」触发交互")
+            # 验证 column_aliases 已持久化
+            check(mem_get_col("原料类型") == "tea_base", "别名已持久化「原料类型」→ tea_base")
+            check(mem_get_col("备注") == "ignore", "别名已持久化「备注」→ ignore")
+            print()
+
+            # ── 9. 指纹缓存命中 → 跳过交互 ──
+            print("9. 指纹缓存命中 → 跳过交互（第二次运行）")
+            hook_calls.clear()
+            exit_code9 = run([
+                "-m", master_path,
+                "-t", interactive_path,
+                "-o", interactive_out,
+            ])
+            check(exit_code9 == 0, f"第二次运行正常（实际 {exit_code9}）")
+            check(len(hook_calls) == 0,
+                  f"缓存命中 → 不触发交互（实际调用 {len(hook_calls)} 次）")
+            print()
+
+            # ── 10. 列别名自动注入（跨模板学习）──
+            print("10. 列别名跨模板自动注入")
+            # 新模板也含「原料类型」列（不同列组合→不同指纹，但别名匹配）
+            df_cross = pd.DataFrame({
+                "菜品名称": ["测试商品"],
+                "原料类型": ["绿茶"],
+                "配料": [""],
+            })
+            cross_path = os.path.join(tmpdir, "cross.xlsx")
+            df_cross.to_excel(cross_path, index=False)
+            cross_out = os.path.join(tmpdir, "cross_out.xlsx")
+
+            hook_calls.clear()
+            cfg_inner.MOCK_SCHEMA_RESPONSE = {
+                "field_mapping": {"菜品名称": "product_name"},
+                "composite_col": None,
+                "target_col": "配料",
+                "irrelevant_cols": [],
+            }
+            exit_code10 = run([
+                "-m", master_path,
+                "-t", cross_path,
+                "-o", cross_out,
+            ])
+            check(exit_code10 == 0, f"跨模板别名注入成功（实际 {exit_code10}）")
+            # 「原料类型」已在 column_aliases 中 → 自动注入 field_mapping，不触发交互
+            check(len(hook_calls) == 0,
+                  f"别名命中 → 不触发交互（实际 {len(hook_calls)} 次）")
+            # 清除测试别名
+            mem_reset()
+            cfg_inner.MOCK_SCHEMA_RESPONSE = orig_schema
+            set_column_prompt_hook(None)
+            print()
+
         finally:
             for f in [master_path, template_path, output_path,
                       output_path.replace(".xlsx", "_report.txt"),
                       os.path.join(tmpdir, "custom_report.txt"),
                       os.path.join(tmpdir, "bad_template.xlsx"),
                       os.path.join(tmpdir, "master_multi.xlsx"),
-                      os.path.join(tmpdir, "template_multi.xlsx")]:
+                      os.path.join(tmpdir, "template_multi.xlsx"),
+                      os.path.join(tmpdir, "interactive.xlsx"),
+                      os.path.join(tmpdir, "interactive_out.xlsx"),
+                      os.path.join(tmpdir, "interactive_out_report.txt"),
+                      os.path.join(tmpdir, "cross.xlsx"),
+                      os.path.join(tmpdir, "cross_out.xlsx"),
+                      os.path.join(tmpdir, "cross_out_report.txt")]:
                 if os.path.exists(f):
                     os.remove(f)
             os.rmdir(tmpdir)

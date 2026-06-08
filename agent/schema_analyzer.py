@@ -160,6 +160,30 @@ def _call_llm(columns: List[str], sample_data: List[Dict[str, Any]]) -> str:
     return response.choices[0].message.content or ""
 
 
+# ── 列覆盖率检测 ──────────────────────────────────────────────
+
+
+def _get_unmapped_columns(
+    all_cols: List[str],
+    field_mapping: Dict[str, str],
+    composite_col: Optional[str],
+    target_col: Optional[str],
+    irrelevant_cols: List[str],
+) -> List[str]:
+    """计算未被覆盖的列名列表。
+
+    已覆盖 = field_mapping 的 key ∪ {composite_col} ∪ {target_col} ∪ irrelevant_cols
+    返回不在已覆盖集合中的列名。
+    """
+    covered = set(field_mapping.keys())
+    if composite_col:
+        covered.add(composite_col)
+    if target_col:
+        covered.add(target_col)
+    covered.update(irrelevant_cols)
+    return [c for c in all_cols if c not in covered]
+
+
 # ── 响应解析与验证 ──────────────────────────────────────────────
 
 
@@ -248,11 +272,16 @@ def analyze(
 ) -> Dict[str, Any]:
     """分析模板 Schema，输出字段映射配置。
 
-    这是 Schema Analyzer 的唯一公开入口。LLM 仅调用一次，结果缓存复用。
+    两阶段处理：
+      Stage 1（Pre-LLM）：查 column_aliases 记忆，注入已知列映射。
+      Stage 2（Post-LLM）：仅有未知列才送 LLM；合并后检测未覆盖列。
+
+    结果缓存：仅在 unrecognized_cols 为空时才写入磁盘指纹缓存，
+    确保二次运行时跳过的不完整结果不会进入持久化。
 
     Args:
         columns: 模板表列名列表（已 strip）。
-        sample_data: 模板前 N 行数据，用于提供语义上下文。传入完整行 dict。
+        sample_data: 模板前 N 行数据，用于提供语义上下文。
         use_cache: 是否使用缓存。默认 True。
 
     Returns:
@@ -261,11 +290,11 @@ def analyze(
             "composite_col": "口味做法组合",     # 或 None
             "target_col": "配料",               # 或 None
             "irrelevant_cols": [],              # 忽略的列名列表
+            "unrecognized_cols": [],            # 未识别列（供 CLI 交互）
         }
 
     Raises:
         ValueError: 模板列为空或 LLM 返回结果不合法。
-        RuntimeError: LLM 调用失败。
     """
     if not columns:
         raise ValueError("模板列名列表不能为空")
@@ -277,51 +306,146 @@ def analyze(
     if use_cache and key in _cache:
         return _cache[key]
 
-    # 计算模板指纹，查询磁盘记忆
     fingerprint = _template_fingerprint(columns)
     if use_cache:
         cached_rule = mem_get_template_rule(fingerprint)
         if cached_rule is not None:
-            # 命中磁盘记忆，同步到进程内缓存
             _cache[key] = cached_rule
             print(f"[Schema] 缓存命中：模板指纹 {fingerprint[:12]}...（跳过 LLM）")
             return cached_rule
 
-    # 未命中，需调用 LLM（或 Mock）
-    if config.USE_MOCK_LLM:
-        print("[Schema] 新模板，调用 LLM 分析...（Mock 模式）")
-        raw = json.dumps(config.MOCK_SCHEMA_RESPONSE, ensure_ascii=False)
+    # ═══════════════════════════════════════════════════════════════
+    # Stage 1: Pre-LLM — 注入已知列别名
+    # ═══════════════════════════════════════════════════════════════
+
+    from data.memory import get_column_alias
+
+    known_fm: Dict[str, str] = {}
+    known_irrelevant: List[str] = []
+    known_composite: Optional[str] = None
+    known_target: Optional[str] = None
+    unknown_cols: List[str] = []
+
+    for col in columns:
+        alias = get_column_alias(col)
+        if alias is None:
+            unknown_cols.append(col)
+        elif alias == "ignore":
+            known_irrelevant.append(col)
+        elif alias == "composite_col":
+            known_composite = col
+        elif alias == "sop":
+            known_target = col
+        elif alias in CANONICAL_FIELDS:
+            known_fm[col] = alias
+        else:
+            # 未知别名值，交给 LLM
+            unknown_cols.append(col)
+
+    # ═══════════════════════════════════════════════════════════════
+    # Stage 2: LLM — 仅对未知列调用
+    # ═══════════════════════════════════════════════════════════════
+
+    llm_fm: Dict[str, str] = {}
+    llm_composite: Optional[str] = None
+    llm_target: Optional[str] = None
+    llm_irrelevant: List[str] = []
+    llm_error: Optional[str] = None
+
+    if unknown_cols:
+        if config.USE_MOCK_LLM:
+            alias_count = len(columns) - len(unknown_cols)
+            if alias_count > 0:
+                print(f"[Schema] 列别名命中 {alias_count} 列，剩余 {len(unknown_cols)} 列送 LLM...（Mock 模式）")
+            else:
+                print("[Schema] 新模板，调用 LLM 分析...（Mock 模式）")
+            raw = json.dumps(config.MOCK_SCHEMA_RESPONSE, ensure_ascii=False)
+        else:
+            alias_count = len(columns) - len(unknown_cols)
+            if alias_count > 0:
+                print(f"[Schema] 列别名命中 {alias_count} 列，剩余 {len(unknown_cols)} 列送 LLM...")
+            else:
+                print("[Schema] 新模板，调用 LLM 分析...")
+            try:
+                # 仅传递未知列的样本数据
+                unknown_sample = [
+                    {c: row.get(c, "") for c in unknown_cols}
+                    for row in sample_data
+                ] if sample_data else []
+                raw = _call_llm(unknown_cols, unknown_sample)
+            except Exception as e:
+                llm_error = f"LLM 调用失败: {e}"
+                raw = None
+
+        if raw is not None:
+            try:
+                llm_data = json.loads(_extract_json(raw))
+                llm_data.setdefault("composite_col", None)
+                llm_data.setdefault("target_col", None)
+                llm_data.setdefault("irrelevant_cols", [])
+
+                # 过滤 field_mapping：只保留未知列范围内的映射
+                if "field_mapping" in llm_data:
+                    llm_fm = {
+                        k: v for k, v in llm_data["field_mapping"].items()
+                        if k in unknown_cols
+                    }
+                # 验证过滤后的结果
+                _validate_response(
+                    {**llm_data, "field_mapping": llm_fm},
+                    unknown_cols,
+                )
+                llm_composite = llm_data.get("composite_col")
+                llm_target = llm_data.get("target_col")
+                llm_irrelevant = llm_data.get("irrelevant_cols", [])
+            except (json.JSONDecodeError, ValueError) as e:
+                llm_error = str(e)
     else:
-        print("[Schema] 新模板，调用 LLM 分析...")
-        try:
-            raw = _call_llm(columns, sample_data)
-        except Exception as e:
-            raise RuntimeError(f"LLM 调用失败: {e}") from e
+        print("[Schema] 所有列已在列别名中，跳过 LLM")
 
-    # 解析 JSON
-    try:
-        data = json.loads(_extract_json(raw))
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"LLM 返回内容无法解析为 JSON:\n---\n{raw}\n---\n错误: {e}"
-        ) from e
+    # ═══════════════════════════════════════════════════════════════
+    # Stage 3: 合并结果
+    # ═══════════════════════════════════════════════════════════════
 
-    # 确保必填字段存在并补充默认值
-    data.setdefault("composite_col", None)
-    data.setdefault("target_col", None)
-    data.setdefault("irrelevant_cols", [])
+    # field_mapping：已知别名优先，LLM 补充
+    fm = dict(known_fm)
+    fm.update(llm_fm)
 
-    # 验证
-    _validate_response(data, columns)
+    # composite / target：已知别名优先，LLM 补充
+    composite_col = known_composite or llm_composite
+    target_col = known_target or llm_target
+    irrelevant_cols = known_irrelevant + llm_irrelevant
 
-    # 写入进程内缓存
-    _cache[key] = data
+    # ═══════════════════════════════════════════════════════════════
+    # Stage 4: 检测未覆盖列
+    # ═══════════════════════════════════════════════════════════════
 
-    # 写入磁盘记忆（持久化）
-    if use_cache:
-        mem_save_template_rule(fingerprint, data)
+    unrecognized = _get_unmapped_columns(
+        columns, fm, composite_col, target_col, irrelevant_cols
+    )
 
-    return data
+    # LLM 失败 → 原本归 LLM 处理的未知列全部变为未识别
+    if llm_error and unknown_cols:
+        unrecognized = sorted(set(unrecognized + unknown_cols))
+        if not config.USE_MOCK_LLM:
+            print(f"[Schema] {llm_error}，{len(unrecognized)} 列待手动确认")
+
+    result = {
+        "field_mapping": fm,
+        "composite_col": composite_col,
+        "target_col": target_col,
+        "irrelevant_cols": irrelevant_cols,
+        "unrecognized_cols": unrecognized,
+    }
+
+    # ── 缓存 ──
+    _cache[key] = result
+
+    # 仅在完全解析时写入磁盘指纹缓存（确保二次运行跳过的是完整结果）
+    if use_cache and not unrecognized:
+        mem_save_template_rule(fingerprint, result)
+
+    return result
 
 
 def analyze_from_dataframe(
@@ -536,6 +660,13 @@ if __name__ == "__main__":
 
     # ── 12. 模板列名变化 → 指纹不同，重新调用 ──
     print("12. 模板列名变化 → 不同指纹 → 重新调用")
+    # 覆盖 mock 以包含新列 "备注"（否则 unrecognized_cols 非空 → 不写缓存）
+    config.MOCK_SCHEMA_RESPONSE = {
+        "field_mapping": {"菜品名称": "product_name", "规格": "size"},
+        "composite_col": "口味做法组合",
+        "target_col": "配料",
+        "irrelevant_cols": ["备注"],
+    }
     columns_b = ["菜品名称", "规格", "口味做法组合", "配料", "备注"]
     fp_b = _template_fingerprint(columns_b)
     check(fp_b != expected_fp, f"不同列名 → 不同指纹 ({fp_b[:12]}... ≠ {expected_fp[:12]}...)")
@@ -545,9 +676,11 @@ if __name__ == "__main__":
 
     result_b = analyze(columns_b, [], use_cache=True)
     check(isinstance(result_b, dict), "新模板分析成功")
+    check(result_b["unrecognized_cols"] == [], "全识别 → unrecognized_cols 为空")
 
     cached_b_after = mem_get_rule(fp_b)
     check(cached_b_after is not None, "新模板结果已写入记忆")
+    config.MOCK_SCHEMA_RESPONSE = original_mock
     print()
 
     # ── 13. 手动删除 memory → 退化为首次运行 ──
@@ -571,7 +704,116 @@ if __name__ == "__main__":
     check(fp_unsorted == expected_fp, f"列名顺序不影响指纹 ({fp_unsorted[:12]}... = {expected_fp[:12]}...)")
     print()
 
+    # ── 15. _get_unmapped_columns ──
+    print("15. _get_unmapped_columns 覆盖率检测")
+    check(_get_unmapped_columns(
+        ["A", "B", "C"], {"A": "product_name"}, None, None, []
+    ) == ["B", "C"], "仅 A 被覆盖 → B, C 未识别")
+    check(_get_unmapped_columns(
+        ["A", "B", "C"], {"A": "product_name"}, "B", None, ["C"]
+    ) == [], "A(fm) + B(composite) + C(irrelevant) → 全覆盖")
+    check(_get_unmapped_columns(
+        [], {}, None, None, []
+    ) == [], "空列名 → 空未识别")
+    print()
+
+    # ── 16. pre-LLM 列别名注入 ──
+    print("16. pre-LLM 列别名注入（column_aliases 记忆）")
+    reset_memory()
+    reset_cache()
+    from data.memory import add_column_alias, get_column_alias as mem_get_col
+
+    # 预设列别名
+    add_column_alias("菜品名称", "product_name")
+    add_column_alias("备注", "ignore")
+
+    # Mock 响应只覆盖 LLM 看到的未知列
+    original_mock = config.MOCK_SCHEMA_RESPONSE
+    config.MOCK_SCHEMA_RESPONSE = {
+        "field_mapping": {"规格": "size"},
+        "composite_col": "口味做法组合",
+        "target_col": None,
+        "irrelevant_cols": [],
+    }
+
+    result16 = analyze(
+        ["菜品名称", "规格", "口味做法组合", "备注", "配料"],
+        [{"菜品名称": "测试", "规格": "中杯", "口味做法组合": "牛奶,少冰",
+          "备注": "备注内容", "配料": ""}],
+    )
+    # "菜品名称" 已被别名覆盖 → 不送 LLM
+    # "备注" → ignore → irrelevant_cols
+    # 剩余 ["规格", "口味做法组合", "配料"] → 送 LLM（Mock 覆盖了前两个）
+    check(result16["field_mapping"].get("菜品名称") == "product_name",
+          "别名注入: 菜品名称 → product_name")
+    check(result16["field_mapping"].get("规格") == "size",
+          "LLM 补充: 规格 → size")
+    check(result16["composite_col"] == "口味做法组合",
+          "LLM 补充: composite_col")
+    check("备注" in result16["irrelevant_cols"],
+          "别名注入: 备注 → ignore → irrelevant_cols")
+    # "配料" 既未被别名覆盖，也未被 LLM 映射 → unrecognized
+    check("配料" in result16["unrecognized_cols"],
+          f"配料 未被识别（实际 unrecognized: {result16['unrecognized_cols']}）")
+    check(result16["unrecognized_cols"] == ["配料"],
+          "仅 配料 未识别")
+    print()
+
+    # ── 17. 不完整结果不写入磁盘缓存 ──
+    print("17. 不完整结果（unrecognized_cols 非空）→ 不写入磁盘指纹缓存")
+    fp17 = _template_fingerprint(["菜品名称", "规格", "口味做法组合", "备注", "配料"])
+    cached17 = mem_get_rule(fp17)
+    check(cached17 is None,
+          f"存在未识别列时不写入缓存（实际: {cached17 is not None}）")
+
+    # 全识别结果应写入缓存 — 先用 column_aliases 覆盖全部列
+    reset_memory()
+    reset_cache()
+    for col, field in [
+        ("菜品名称", "product_name"),
+        ("规格", "size"),
+        ("口味做法组合", "composite_col"),
+        ("备注", "ignore"),
+        ("配料", "sop"),
+    ]:
+        add_column_alias(col, field)
+    config.MOCK_SCHEMA_RESPONSE = {}
+    result17 = analyze(
+        ["菜品名称", "规格", "口味做法组合", "备注", "配料"],
+        [{"菜品名称": "测试", "规格": "中杯", "口味做法组合": "牛奶,少冰",
+          "备注": "备注内容", "配料": ""}],
+    )
+    check(result17["unrecognized_cols"] == [],
+          f"列别名全覆盖 → unrecognized 为空（实际: {result17['unrecognized_cols']}）")
+    check(result17["target_col"] == "配料",
+          "别名 '配料' → sop → target_col")
+    check(result17["irrelevant_cols"] == ["备注"],
+          "别名 '备注' → ignore → irrelevant_cols")
+    cached17b = mem_get_rule(fp17)
+    check(cached17b is not None,
+          "全识别后写入缓存")
+    print()
+
+    # ── 18. unrecognized_cols 在返回值中 ──
+    print("18. unrecognized_cols 返回值验证")
+    reset_memory()
+    reset_cache()
+    config.MOCK_SCHEMA_RESPONSE = {
+        "field_mapping": {"A": "product_name"},
+        "composite_col": None,
+        "target_col": None,
+        "irrelevant_cols": [],
+    }
+    result18 = analyze(["A", "B", "C"], [{"A": "x", "B": "y", "C": "z"}])
+    check("unrecognized_cols" in result18, "返回值含 unrecognized_cols")
+    check(isinstance(result18["unrecognized_cols"], list),
+          "unrecognized_cols 是 list")
+    check(set(result18["unrecognized_cols"]) == {"B", "C"},
+          f"B, C 未识别（实际 {result18['unrecognized_cols']}）")
+    print()
+
     # 清理
+    config.MOCK_SCHEMA_RESPONSE = original_mock
     from data.memory import reset_memory as rm
     rm()
 
