@@ -24,8 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
 示例:
   python main.py --master 主数据表.xlsx --template POS模板.xlsx --output 结果.xlsx
   python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --target-col 配料
-  python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --sheet 1
   python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx -r 报告.txt
+
+--sheet 参数（位置语义）:
+  -t template.xlsx --sheet 1    → 模板表读取第 2 个 Sheet
+  -m master.xlsx --sheet 2      → 主数据表读取第 3 个 Sheet
+  两者可同时使用，各自独立。Sheet 序号从 0 开始，默认 0。
         """,
     )
 
@@ -55,12 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="校验报告输出路径（默认: <output>_report.txt）",
     )
     parser.add_argument(
-        "--sheet",
-        type=int,
-        default=0,
-        help="模板表 Sheet 序号（从 0 开始，默认 0 即第一张表）",
-    )
-    parser.add_argument(
         "--langgraph",
         action="store_true",
         default=False,
@@ -82,6 +80,58 @@ def _validate_file(path: str, label: str) -> None:
         raise CLIError(f"{label} 不是有效文件: {path}")
 
 
+def _resolve_sheet_args(argv: list) -> tuple:
+    """预扫描 argv，根据 --sheet 在命令行中的位置决定其归属。
+
+    规则：
+      - -t/--template 之后出现的 --sheet N → 模板表 Sheet
+      - -m/--master  之后出现的 --sheet N → 主数据表 Sheet
+      - 未跟在任何文件参数之后的 --sheet N → 默认属于模板
+
+    Args:
+        argv: 原始命令行参数列表（如 sys.argv[1:]）。
+
+    Returns:
+        (filtered_argv, master_sheet, template_sheet)
+        filtered_argv: 移除了 --sheet 及其值的参数列表，供 argparse 使用。
+    """
+    master_sheet = 0
+    template_sheet = 0
+    last_file_arg = None  # 'master' | 'template' | None
+
+    filtered = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        # 追踪最近的文件参数
+        if arg in ("-m", "--master"):
+            last_file_arg = "master"
+            filtered.append(arg)
+        elif arg in ("-t", "--template"):
+            last_file_arg = "template"
+            filtered.append(arg)
+        elif arg == "--sheet":
+            if i + 1 < len(argv):
+                try:
+                    sheet_val = int(argv[i + 1])
+                except (ValueError, TypeError):
+                    sheet_val = 0
+                if last_file_arg == "master":
+                    master_sheet = sheet_val
+                else:
+                    # 默认属于模板（含 --sheet 出现在文件参数之前的情况）
+                    template_sheet = sheet_val
+                i += 1  # 跳过 --sheet 的值
+            # --sheet 及其值不加入 filtered（argparse 不感知）
+        else:
+            filtered.append(arg)
+
+        i += 1
+
+    return filtered, master_sheet, template_sheet
+
+
 def run(args: Optional[list] = None) -> int:
     """执行 CLI 主流程。
 
@@ -91,8 +141,13 @@ def run(args: Optional[list] = None) -> int:
     Returns:
         exit code: 0=成功, 1=失败
     """
+    # 预扫描 --sheet 位置语义（必须在 argparse 之前）
+    if args is None:
+        args = sys.argv[1:]
+    filtered_args, master_sheet, template_sheet = _resolve_sheet_args(list(args))
+
     parser = build_parser()
-    opts = parser.parse_args(args)
+    opts = parser.parse_args(filtered_args)
 
     # 延迟导入：避免 argparse --help 时加载重依赖
     from agent.workflow import run_pipeline
@@ -110,8 +165,8 @@ def run(args: Optional[list] = None) -> int:
     print("=" * 56)
     print("  POS Template Mapping Agent")
     print("=" * 56)
-    print(f"  主数据表: {opts.master}")
-    print(f"  模板表:   {opts.template} (Sheet {opts.sheet})")
+    print(f"  主数据表: {opts.master} (Sheet {master_sheet})")
+    print(f"  模板表:   {opts.template} (Sheet {template_sheet})")
     print(f"  目标列:   {opts.target_col}")
     print(f"  输出:     {opts.output}")
     print(f"  报告:     {report_path}")
@@ -129,7 +184,8 @@ def run(args: Optional[list] = None) -> int:
         output_path=opts.output,
         report_path=report_path,
         target_col=opts.target_col,
-        sheet_name=opts.sheet,
+        master_sheet=master_sheet,
+        template_sheet=template_sheet,
         use_langgraph=opts.langgraph,
     )
     elapsed = time.time() - t0
@@ -274,7 +330,7 @@ if __name__ == "__main__":
                 help_text = parser.format_help()
                 check("--master" in help_text, "--master 出现在 help 中")
                 check("--target-col" in help_text, "--target-col 出现在 help 中")
-                check("--sheet" in help_text, "--sheet 出现在 help 中")
+                check("--sheet" in help_text, "--sheet 位置语义在 help 中说明")
                 check("示例" in help_text, "help 包含示例")
             except SystemExit:
                 check(False, "--help 不应触发 SystemExit")
@@ -290,45 +346,84 @@ if __name__ == "__main__":
             check(exit_code5 == 0, "简写参数正常执行")
             print()
 
-            # ── 6. --sheet 参数指定 Sheet ──
-            print("6. --sheet 参数指定 Sheet")
-            multi_sheet = os.path.join(tmpdir, "multi_sheet.xlsx")
-            # Sheet 0: 错误数据（不应被读取）
-            # Sheet 1: 正确数据
-            with pd.ExcelWriter(multi_sheet, engine="openpyxl") as writer:
+            # ── 6. --sheet 位置语义 ──
+            print("6. --sheet 位置语义（-t 后 vs -m 后）")
+            # 构造主数据：sheet 0 和 sheet 1 数据不同，通过 SOP 区分
+            master_multi = os.path.join(tmpdir, "master_multi.xlsx")
+            with pd.ExcelWriter(master_multi, engine="openpyxl") as writer:
                 pd.DataFrame({
-                    "品名": ["错误商品"],
-                    "杯型": ["大杯"],
-                    "奶底": [""],
-                    "做法": ["正常冰"],
-                    "糖": ["全糖"],
-                    "SOP": ["WRONG"],
+                    "品名": ["浅浅清茶"],
+                    "杯型": ["中杯"],
+                    "奶底": ["牛奶"],
+                    "做法": ["少冰"],
+                    "糖": ["七分糖"],
+                    "SOP": ["SHEET0_WRONG"],   # sheet 0 的错误数据
                 }).to_excel(writer, sheet_name="Sheet0", index=False)
                 pd.DataFrame({
-                    "品名": ["浅浅清茶", "珍珠奶茶"],
-                    "杯型": ["中杯", "中杯"],
-                    "奶底": ["牛奶", "椰乳"],
-                    "做法": ["少冰", "热"],
-                    "糖": ["七分糖", "无糖"],
-                    "SOP": ["T240", "T180"],
+                    "品名": ["浅浅清茶"],
+                    "杯型": ["中杯"],
+                    "奶底": ["牛奶"],
+                    "做法": ["少冰"],
+                    "糖": ["七分糖"],
+                    "SOP": ["T240_CORRECT"],   # sheet 1 的正确数据
                 }).to_excel(writer, sheet_name="Sheet1", index=False)
-            # 模板也放正确的 sheet 1
-            with pd.ExcelWriter(template_path, engine="openpyxl") as writer:
-                pd.DataFrame({"A": ["ignored"]}).to_excel(writer, sheet_name="Sheet0", index=False)
+
+            # 构造模板：sheet 0 和 sheet 1 数据不同
+            template_multi = os.path.join(tmpdir, "template_multi.xlsx")
+            with pd.ExcelWriter(template_multi, engine="openpyxl") as writer:
                 pd.DataFrame({
-                    "菜品名称": ["浅浅清茶", "珍珠奶茶"],
-                    "规格": ["中杯", "中杯"],
-                    "口味做法组合": ["牛奶, 少冰, 七分糖", "椰乳, 热, 无糖"],
-                    "配料": ["", ""],
+                    "菜品名称": ["不相干商品"],
+                    "规格": ["大杯"],
+                    "口味做法组合": ["红茶, 全糖, 正常冰"],
+                    "配料": [""],
+                }).to_excel(writer, sheet_name="Sheet0", index=False)
+                pd.DataFrame({
+                    "菜品名称": ["浅浅清茶"],
+                    "规格": ["中杯"],
+                    "口味做法组合": ["牛奶, 少冰, 七分糖"],
+                    "配料": [""],
                 }).to_excel(writer, sheet_name="Sheet1", index=False)
-            exit_code6 = run([
-                "-m", multi_sheet,
-                "-t", template_path,
+
+            # 6a: --sheet 1 跟在 -t 后面 → 模板 sheet 1, 主数据 sheet 0 → LOW（主数据错）
+            print("  6a: --sheet 1 在 -t 后 → 模板 Sheet 1, 主数据 Sheet 0")
+            exit_code6a = run([
+                "-m", master_multi,
+                "-t", template_multi, "--sheet", "1",
                 "-o", output_path,
-                "--sheet", "1",
             ])
-            check(exit_code6 == 0, f"--sheet 1 正常执行（实际 {exit_code6}）")
-            check(os.path.exists(output_path), "--sheet 1 输出文件已生成")
+            check(exit_code6a == 0, f"exit_code=0（实际 {exit_code6a}）")
+            df_6a = pd.read_excel(output_path)
+            # 主数据 sheet 0 是 SHEET0_WRONG，模板 sheet 1 能匹配「浅浅清茶」但 SOP 来自主数据 sheet 0
+            check(df_6a.iloc[0]["配料"] == "SHEET0_WRONG",
+                  f"读到主数据 Sheet 0 的 SOP=SHEET0_WRONG（实际 {df_6a.iloc[0]['配料']}）")
+            print()
+
+            # 6b: --sheet 1 跟在 -m 后面 → 主数据 sheet 1, 模板 sheet 0 → LOW（模板无匹配）
+            print("  6b: --sheet 1 在 -m 后 → 主数据 Sheet 1, 模板 Sheet 0")
+            exit_code6b = run([
+                "-m", master_multi, "--sheet", "1",
+                "-t", template_multi,
+                "-o", output_path,
+            ])
+            check(exit_code6b == 0, f"exit_code=0（实际 {exit_code6b}）")
+            df_6b = pd.read_excel(output_path)
+            check(df_6b.iloc[0]["匹配置信度"] == "LOW_CONFIDENCE",
+                  f"模板 Sheet 0 无匹配 → LOW_CONFIDENCE（实际 {df_6b.iloc[0]['匹配置信度']}）")
+            print()
+
+            # 6c: 两个 --sheet 各自独立 → 都读 sheet 1 → HIGH
+            print("  6c: -m --sheet 1 和 -t --sheet 1 同时使用 → 都读 Sheet 1")
+            exit_code6c = run([
+                "-m", master_multi, "--sheet", "1",
+                "-t", template_multi, "--sheet", "1",
+                "-o", output_path,
+            ])
+            check(exit_code6c == 0, f"exit_code=0（实际 {exit_code6c}）")
+            df_6c = pd.read_excel(output_path)
+            check(df_6c.iloc[0]["配料"] == "T240_CORRECT",
+                  f"两个 Sheet 1 → SOP=T240_CORRECT（实际 {df_6c.iloc[0]['配料']}）")
+            check(df_6c.iloc[0]["匹配置信度"] == "HIGH",
+                  f"置信度 HIGH（实际 {df_6c.iloc[0]['匹配置信度']}）")
             print()
 
             # ── 7. 管线失败 → exit_code=1 ──
@@ -348,7 +443,8 @@ if __name__ == "__main__":
                       output_path.replace(".xlsx", "_report.txt"),
                       os.path.join(tmpdir, "custom_report.txt"),
                       os.path.join(tmpdir, "bad_template.xlsx"),
-                      os.path.join(tmpdir, "multi_sheet.xlsx")]:
+                      os.path.join(tmpdir, "master_multi.xlsx"),
+                      os.path.join(tmpdir, "template_multi.xlsx")]:
                 if os.path.exists(f):
                     os.remove(f)
             os.rmdir(tmpdir)
