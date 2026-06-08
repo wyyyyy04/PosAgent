@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
 示例:
   python main.py --master 主数据表.xlsx --template POS模板.xlsx --output 结果.xlsx
   python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --target-col 配料
+  python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --sheet 1
   python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx -r 报告.txt
         """,
     )
@@ -52,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-r", "--report",
         default=None,
         help="校验报告输出路径（默认: <output>_report.txt）",
+    )
+    parser.add_argument(
+        "--sheet",
+        type=int,
+        default=0,
+        help="模板表 Sheet 序号（从 0 开始，默认 0 即第一张表）",
     )
     parser.add_argument(
         "--langgraph",
@@ -104,7 +111,7 @@ def run(args: Optional[list] = None) -> int:
     print("  POS Template Mapping Agent")
     print("=" * 56)
     print(f"  主数据表: {opts.master}")
-    print(f"  模板表:   {opts.template}")
+    print(f"  模板表:   {opts.template} (Sheet {opts.sheet})")
     print(f"  目标列:   {opts.target_col}")
     print(f"  输出:     {opts.output}")
     print(f"  报告:     {report_path}")
@@ -122,6 +129,7 @@ def run(args: Optional[list] = None) -> int:
         output_path=opts.output,
         report_path=report_path,
         target_col=opts.target_col,
+        sheet_name=opts.sheet,
         use_langgraph=opts.langgraph,
     )
     elapsed = time.time() - t0
@@ -266,7 +274,7 @@ if __name__ == "__main__":
                 help_text = parser.format_help()
                 check("--master" in help_text, "--master 出现在 help 中")
                 check("--target-col" in help_text, "--target-col 出现在 help 中")
-                check("--langgraph" in help_text, "--langgraph 出现在 help 中")
+                check("--sheet" in help_text, "--sheet 出现在 help 中")
                 check("示例" in help_text, "help 包含示例")
             except SystemExit:
                 check(False, "--help 不应触发 SystemExit")
@@ -282,8 +290,49 @@ if __name__ == "__main__":
             check(exit_code5 == 0, "简写参数正常执行")
             print()
 
-            # ── 6. 管线失败 → exit_code=1 ──
-            print("6. 管线失败 → exit_code=1")
+            # ── 6. --sheet 参数指定 Sheet ──
+            print("6. --sheet 参数指定 Sheet")
+            multi_sheet = os.path.join(tmpdir, "multi_sheet.xlsx")
+            # Sheet 0: 错误数据（不应被读取）
+            # Sheet 1: 正确数据
+            with pd.ExcelWriter(multi_sheet, engine="openpyxl") as writer:
+                pd.DataFrame({
+                    "品名": ["错误商品"],
+                    "杯型": ["大杯"],
+                    "奶底": [""],
+                    "做法": ["正常冰"],
+                    "糖": ["全糖"],
+                    "SOP": ["WRONG"],
+                }).to_excel(writer, sheet_name="Sheet0", index=False)
+                pd.DataFrame({
+                    "品名": ["浅浅清茶", "珍珠奶茶"],
+                    "杯型": ["中杯", "中杯"],
+                    "奶底": ["牛奶", "椰乳"],
+                    "做法": ["少冰", "热"],
+                    "糖": ["七分糖", "无糖"],
+                    "SOP": ["T240", "T180"],
+                }).to_excel(writer, sheet_name="Sheet1", index=False)
+            # 模板也放正确的 sheet 1
+            with pd.ExcelWriter(template_path, engine="openpyxl") as writer:
+                pd.DataFrame({"A": ["ignored"]}).to_excel(writer, sheet_name="Sheet0", index=False)
+                pd.DataFrame({
+                    "菜品名称": ["浅浅清茶", "珍珠奶茶"],
+                    "规格": ["中杯", "中杯"],
+                    "口味做法组合": ["牛奶, 少冰, 七分糖", "椰乳, 热, 无糖"],
+                    "配料": ["", ""],
+                }).to_excel(writer, sheet_name="Sheet1", index=False)
+            exit_code6 = run([
+                "-m", multi_sheet,
+                "-t", template_path,
+                "-o", output_path,
+                "--sheet", "1",
+            ])
+            check(exit_code6 == 0, f"--sheet 1 正常执行（实际 {exit_code6}）")
+            check(os.path.exists(output_path), "--sheet 1 输出文件已生成")
+            print()
+
+            # ── 7. 管线失败 → exit_code=1 ──
+            print("7. 管线失败 → exit_code=1")
             # 损坏的模板文件验证：在 run() 中会先通过 _validate_file 检查文件存在
             # 这里测试 workflow 内部错误（空文件且路径存在但缺 sheet 等情况不适用）
             # 改为测试文件存在但内容破坏的场景
@@ -298,7 +347,8 @@ if __name__ == "__main__":
             for f in [master_path, template_path, output_path,
                       output_path.replace(".xlsx", "_report.txt"),
                       os.path.join(tmpdir, "custom_report.txt"),
-                      os.path.join(tmpdir, "bad_template.xlsx")]:
+                      os.path.join(tmpdir, "bad_template.xlsx"),
+                      os.path.join(tmpdir, "multi_sheet.xlsx")]:
                 if os.path.exists(f):
                     os.remove(f)
             os.rmdir(tmpdir)

@@ -38,12 +38,14 @@ class PipelineState:
         output_path: str,
         report_path: Optional[str] = None,
         target_col: str = "配料",
+        sheet_name: int = 0,
     ):
         self.master_path = master_path
         self.template_path = template_path
         self.output_path = output_path
         self.report_path = report_path or output_path.replace(".xlsx", "_report.txt")
         self.target_col = target_col
+        self.sheet_name = sheet_name
 
         # 中间数据
         self.master_df: Optional[pd.DataFrame] = None
@@ -81,8 +83,8 @@ def step_load_data(state: PipelineState) -> PipelineState:
     if state.has_error:
         return state
     try:
-        state.master_df = read_master(state.master_path)
-        state.template_df = read_template(state.template_path)
+        state.master_df = read_master(state.master_path, sheet_name=state.sheet_name)
+        state.template_df = read_template(state.template_path, sheet_name=state.sheet_name)
     except Exception as e:
         state.set_error("load_data", str(e))
     return state
@@ -320,6 +322,7 @@ def run_pipeline(
     output_path: str,
     report_path: Optional[str] = None,
     target_col: str = "配料",
+    sheet_name: int = 0,
     use_langgraph: bool = False,
 ) -> PipelineState:
     """运行完整的 POS 模板映射管线。
@@ -333,6 +336,7 @@ def run_pipeline(
         output_path: 输出 Excel 路径。
         report_path: 校验报告路径（默认 output_path 同目录 + _report.txt）。
         target_col: 需要填充的目标列名，默认 "配料"。
+        sheet_name: 模板表 Sheet 序号（从 0 开始），默认 0。
         use_langgraph: 是否使用 LangGraph 编排（需安装 langgraph）。
 
     Returns:
@@ -348,6 +352,7 @@ def run_pipeline(
         output_path=output_path,
         report_path=report_path,
         target_col=target_col,
+        sheet_name=sheet_name,
     )
 
     # 重置 API 调用计数器（每次管线运行重新计数）
