@@ -55,6 +55,7 @@ def _cmd_help(_args: List[str]) -> str:
   记忆管理 (/memory):
     /memory list              列出所有 token 别名
     /memory add <词语> <类型>   添加 token 别名
+    /memory edit <词语> <类型>  修改已有 token 别名类型
     /memory delete <词语>       删除 token 别名
     /memory reset              清空所有长期记忆
 
@@ -115,6 +116,35 @@ def _cmd_memory_add(args: List[str]) -> str:
     add_token(word, cn_type)
     en_type = _TYPE_CN_TO_EN.get(cn_type, cn_type)
     return f"已添加: 「{word}」→ {cn_type} ({en_type})"
+
+
+def _cmd_memory_edit(args: List[str]) -> str:
+    """编辑 token 别名类型：/memory edit <词语> <新类型>"""
+    if len(args) < 2:
+        return "用法: /memory edit <词语> <新类型>\n类型合法值: " + ", ".join(_VALID_TYPES_EN)
+
+    word = args[0]
+    raw_type = args[1]
+    cn_type = _resolve_type(raw_type)
+
+    if cn_type is None:
+        return (
+            f"非法类型「{raw_type}」\n"
+            f"合法值: {', '.join(_VALID_TYPES_EN)}\n"
+            f"中文别名: {', '.join(_VALID_TYPES_CN)}"
+        )
+
+    from data.memory import edit_token, get_token_type
+
+    old_type = get_token_type(word)
+    if old_type is None:
+        return f"词条「{word}」不存在，无法编辑。请先用 /memory add 添加"
+
+    ok = edit_token(word, cn_type)
+    if ok:
+        en_type = _TYPE_CN_TO_EN.get(cn_type, cn_type)
+        return f"已修改: 「{word}」{old_type} → {cn_type} ({en_type})"
+    return f"编辑失败：词条「{word}」不存在"
 
 
 def _cmd_memory_delete(args: List[str]) -> str:
@@ -264,12 +294,14 @@ def _cmd_memory_dispatch(args: List[str]) -> str:
         return _cmd_memory_list(rest)
     elif sub == "add":
         return _cmd_memory_add(rest)
+    elif sub == "edit":
+        return _cmd_memory_edit(rest)
     elif sub == "delete":
         return _cmd_memory_delete(rest)
     elif sub == "reset":
         return _cmd_memory_reset(rest)
     else:
-        return f"未知 /memory 子指令: {sub}\n可用: list, add, delete, reset"
+        return f"未知 /memory 子指令: {sub}\n可用: list, add, edit, delete, reset"
 
 
 def _cmd_template_dispatch(args: List[str]) -> str:
@@ -563,8 +595,30 @@ if __name__ == "__main__":
     check("不存在" in r7, "提示词条不存在")
     print()
 
-    # ── 8. /memory reset 确认流程 ──
-    print("8. /memory reset 确认流程")
+    # ── 8. /memory edit 修改已有词条类型 ──
+    print("8. /memory edit 修改已有词条类型")
+    # 先添加一个词
+    process_command("/memory add 选错的词 茶底")
+    check(get_token_type("选错的词") == "茶底", "初始类型为茶底")
+    # 编辑修改
+    r8a = process_command("/memory edit 选错的词 milk_base")
+    check("已修改" in r8a, f"编辑成功: {r8a[:50]}")
+    check(get_token_type("选错的词") == "奶底", "类型已改为奶底")
+    # 编辑不存在的词
+    r8b = process_command("/memory edit 不存在的词 茶底")
+    check("不存在" in r8b, "不存在的词提示错误")
+    # 编辑非法类型
+    r8c = process_command("/memory edit 选错的词 invalid")
+    check("非法类型" in r8c, "非法类型提示错误")
+    # 参数不足
+    r8d = process_command("/memory edit")
+    check("用法" in r8d, "参数不足提示用法")
+    r8e = process_command("/memory edit 只有一个参数")
+    check("用法" in r8e, "只有一个参数也提示用法")
+    print()
+
+    # ── 9. /memory reset 确认流程 ──
+    print("9. /memory reset 确认流程")
     r8 = process_command("/memory reset")
     check(r8.startswith("[CONFIRM]"), f"返回 CONFIRM: {r8[:60]}")
     check("yes/不可撤销" in r8, "提示需要完整确认词")
@@ -574,14 +628,14 @@ if __name__ == "__main__":
     check("已清空" in reset_result, f"确认后清空成功: {reset_result}")
     print()
 
-    # ── 9. /memory list 空列表 ──
-    print("9. /memory list 空列表")
+    # ── 10. /memory list 空列表 ──
+    print("10. /memory list 空列表")
     r9 = process_command("/memory list")
     check("暂无" in r9, "空列表时提示「暂无」")
     print()
 
-    # ── 10. /template list 有缓存 ──
-    print("10. /template list 有缓存时展示")
+    # ── 11. /template list 有缓存 ──
+    print("11. /template list 有缓存时展示")
     from data.memory import save_template_rule
     save_template_rule("a1b2c3d4e5f6a7b8", {
         "field_mapping": {"菜品名称": "product_name", "规格": "size"},
@@ -594,8 +648,8 @@ if __name__ == "__main__":
     check("2" in r10, "显示列数")
     print()
 
-    # ── 11. /template list 无缓存 ──
-    print("11. /template list 无缓存")
+    # ── 12. /template list 无缓存 ──
+    print("12. /template list 无缓存")
     reset_memory()
     r11 = process_command("/template list")
     check("暂无" in r11, "无缓存时提示「暂无」")
@@ -608,8 +662,8 @@ if __name__ == "__main__":
     })
     print()
 
-    # ── 12. /template show ──
-    print("12. /template show")
+    # ── 13. /template show ──
+    print("13. /template show")
     r12 = process_command("/template show a1b2c3d4")
     check("菜品名称" in r12, "显示字段映射中的模板列")
     check("product_name" in r12, "显示标准字段名")
@@ -623,8 +677,8 @@ if __name__ == "__main__":
     check("用法" in r12c, "无参数时提示用法")
     print()
 
-    # ── 13. /template clear 确认流程 ──
-    print("13. /template clear 确认流程")
+    # ── 14. /template clear 确认流程 ──
+    print("14. /template clear 确认流程")
     r13 = process_command("/template clear a1b2c3d4")
     check(r13.startswith("[CONFIRM]"), f"返回 CONFIRM: {r13[:60]}")
     # 模拟确认
@@ -638,21 +692,21 @@ if __name__ == "__main__":
     check(len(get_template_rules()) == 0, "缓存已清空")
     print()
 
-    # ── 14. 未知指令 ──
-    print("14. 未知指令")
+    # ── 15. 未知指令 ──
+    print("15. 未知指令")
     r14 = process_command("/unknown_command")
     check("未知指令" in r14, "提示未知指令")
     check("/help" in r14, "建议查看 /help")
     print()
 
-    # ── 15. /exit ──
-    print("15. /exit")
+    # ── 16. /exit ──
+    print("16. /exit")
     r15 = process_command("/exit")
     check(r15 == "[EXIT]", "返回 [EXIT] 信号")
     print()
 
-    # ── 16. /run 在 REPL 内执行映射任务 ──
-    print("16. /run 在 REPL 内执行映射任务")
+    # ── 17. /run 在 REPL 内执行映射任务 ──
+    print("17. /run 在 REPL 内执行映射任务")
     import tempfile
     import pandas as pd
 
@@ -700,21 +754,21 @@ if __name__ == "__main__":
     cfg.MOCK_TOKEN_RESPONSE = original_mock
     reset_cache()
 
-    # ── 17. /run 参数不足 ──
-    print("17. /run 参数不足 → 用法提示")
+    # ── 18. /run 参数不足 ──
+    print("18. /run 参数不足 → 用法提示")
     r17 = process_command("/run")
     check("用法" in r17, "返回用法提示")
     print()
 
-    # ── 18. /memory add 支持中文类型 ──
-    print("18. /memory add 支持中文类型名")
+    # ── 19. /memory add 支持中文类型 ──
+    print("19. /memory add 支持中文类型名")
     r18 = process_command("/memory add 黑芝麻仙草 茶底")
     check("已添加" in r18, f"中文类型名有效: {r18[:50]}")
     check(get_token_type("黑芝麻仙草") == "茶底", "中文类型正确存储")
     print()
 
-    # ── 19. 非斜杠输入 → /run ──
-    print("19. 空指令/边角情况")
+    # ── 20. 非斜杠输入 → /run ──
+    print("20. 空指令/边角情况")
     r19a = process_command("")
     check(r19a == "", "空输入返回空")
     r19b = process_command("/memory")

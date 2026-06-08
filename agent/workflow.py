@@ -360,11 +360,13 @@ def run_pipeline(
         template_sheet=template_sheet,
     )
 
-    # 重置 API 调用计数器（每次管线运行重新计数）
+    # 重置 API 调用计数器 + 会话新增 token 追踪
     from agent.schema_analyzer import reset_api_call_count as _sa_reset
     from agent.token_classifier import reset_api_call_count as _tc_reset
+    from data.memory import reset_new_tokens as _reset_new_tokens
     _sa_reset()
     _tc_reset()
+    _reset_new_tokens()
 
     if use_langgraph:
         app = build_graph()

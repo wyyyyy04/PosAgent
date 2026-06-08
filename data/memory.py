@@ -29,6 +29,25 @@ _MEMORY_PATH = os.path.join(_MEMORY_DIR, "memory.json")
 _data: Optional[Dict[str, Any]] = None
 _dirty: bool = False
 
+# ── 会话内新增 token 追踪（用于运行结束后的摘要展示）──────────────
+
+_session_new_tokens: list = []  # [(word, type), ...]
+
+
+def get_new_tokens() -> list:
+    """返回本次管线运行中新增的 token 列表（供摘要展示）。
+
+    Returns:
+        [(word, type), ...] 按添加顺序排列。
+    """
+    return list(_session_new_tokens)
+
+
+def reset_new_tokens() -> None:
+    """清空会话新增 token 追踪（每次管线运行开始时调用）。"""
+    global _session_new_tokens
+    _session_new_tokens = []
+
 
 # ── 内部方法 ────────────────────────────────────────────────────
 
@@ -119,6 +138,30 @@ def add_token(word: str, token_type: str) -> None:
     }
     _dirty = True
     _save()
+    # 记录到会话新增列表（用于运行后摘要展示）
+    _session_new_tokens.append((word, token_type))
+
+
+def edit_token(word: str, new_type: str) -> bool:
+    """修改已有 token 别名的类型并持久化。
+
+    Args:
+        word: 要修改的 token 文本。
+        new_type: 新的类型字符串。
+
+    Returns:
+        True 如果词条存在并被修改，False 如果词条不存在。
+    """
+    global _dirty
+    data = _load()
+    aliases = data.get("token_aliases", {})
+    if word not in aliases:
+        return False
+    aliases[word]["type"] = new_type
+    aliases[word]["modified"] = date.today().isoformat()
+    _dirty = True
+    _save()
+    return True
 
 
 def list_aliases() -> Dict[str, Dict[str, str]]:
@@ -264,10 +307,11 @@ def reload() -> None:
 
 def reset_memory() -> None:
     """清空所有记忆数据（用于测试）。"""
-    global _data, _dirty
+    global _data, _dirty, _session_new_tokens
     _data = _default_structure()
     _dirty = True
     _save()
+    _session_new_tokens = []
 
 
 # ── 自测 ────────────────────────────────────────────────────────
@@ -405,6 +449,33 @@ if __name__ == "__main__":
     check(data["token_aliases"] == {}, "token_aliases 已清空")
     check(data["template_rules"] == {}, "template_rules 已清空")
     check(data["match_corrections"] == [], "match_corrections 已清空")
+    print()
+
+    # ── 11. edit_token ──
+    print("11. edit_token 修改已有词条类型")
+    add_token("测试误选词", "茶底")
+    check(get_token_type("测试误选词") == "茶底", "初始类型为茶底")
+    ok = edit_token("测试误选词", "奶底")
+    check(ok is True, "edit_token 返回 True（词条存在）")
+    check(get_token_type("测试误选词") == "奶底", "类型已改为奶底")
+    # 编辑不存在的词
+    ok2 = edit_token("不存在的词", "茶底")
+    check(ok2 is False, "edit_token 返回 False（词条不存在）")
+    print()
+
+    # ── 12. get_new_tokens / reset_new_tokens ──
+    print("12. get_new_tokens / reset_new_tokens 会话追踪")
+    reset_memory()
+    reset_new_tokens()
+    check(len(get_new_tokens()) == 0, "初始为空")
+    add_token("词A", "茶底")
+    add_token("词B", "奶底")
+    new_tokens = get_new_tokens()
+    check(len(new_tokens) == 2, "新增 2 条记录")
+    check(("词A", "茶底") in new_tokens, "词A→茶底 在列表中")
+    check(("词B", "奶底") in new_tokens, "词B→奶底 在列表中")
+    reset_new_tokens()
+    check(len(get_new_tokens()) == 0, "reset 后清空")
     print()
 
     # ── 还原原始记忆数据 ──

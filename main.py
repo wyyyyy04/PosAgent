@@ -219,6 +219,15 @@ def run(args: Optional[list] = None) -> int:
                 score = r.get("product_score", 0)
                 print(f"       - 行 {i+1}: 分数={score:.1f}, 类型={r.get('match_type', '?')}")
 
+    # ── 展示本次新增的记忆条目 ──
+    from data.memory import get_new_tokens
+    new_tokens = get_new_tokens()
+    if new_tokens:
+        print(f"\n  [记忆] 本次运行新增了 {len(new_tokens)} 个 token 别名:")
+        for word, ttype in new_tokens:
+            print(f"         「{word}」→ {ttype}")
+        print(f"    💡 如有误选，可执行 /memory edit <词语> <新类型> 修正")
+
     print(f"\n  输出文件: {opts.output}")
     print(f"  校验报告: {report_path}")
     return 0
