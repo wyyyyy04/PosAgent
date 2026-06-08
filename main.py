@@ -303,7 +303,80 @@ def run(args: Optional[list] = None) -> int:
             print(f"[Schema] 完整结果已写入模板指纹缓存 {fingerprint[:12]}...")
         # 如果 unrecognized 为空，analyze() 内部已写入缓存
 
-    # 运行管线
+    # ── 主数据预加载 + 列推断（LLM + 交互兜底）──
+    from excel_io.excel_reader import (
+        read_master,
+        MASTER_REQUIRED_COLUMNS,
+        MASTER_WILDCARD_COLUMNS,
+        MASTER_OPTIONAL_COLUMNS,
+    )
+    from data.memory import add_column_alias as mem_add_col_alias
+    from agent.schema_analyzer import infer_master_columns
+
+    master_df = read_master(opts.master, sheet_name=master_sheet, soft_validation=True)
+    missing_master = master_df.attrs.get("_missing_required", [])
+
+    if missing_master:
+        # 找出候选列：不在硬编码映射 + 别名映射覆盖范围内的列
+        already_covered = (
+            set(MASTER_REQUIRED_COLUMNS)
+            | set(MASTER_WILDCARD_COLUMNS)
+            | set(MASTER_OPTIONAL_COLUMNS)
+        )
+        already_covered.difference_update(missing_master)  # 缺失的不能算已覆盖
+        candidate_cols = [c for c in master_df.columns if c not in already_covered]
+
+        if candidate_cols:
+            # 提取候选列样例值（每列最多 5 个）
+            import pandas as _pd
+            sample_data = {}
+            for col in candidate_cols:
+                vals = (
+                    master_df[col].dropna().astype(str).unique()[:5].tolist()
+                    if col in master_df.columns else []
+                )
+                sample_data[col] = vals
+
+            # LLM 推断
+            inference = infer_master_columns(candidate_cols, sample_data, missing_master)
+
+            # 按置信度分流
+            high_conf = {}
+            low_conf = {}
+            for col, info in inference.items():
+                if info.get("confidence") == "high" and info.get("field"):
+                    high_conf[col] = info
+                else:
+                    low_conf[col] = info
+
+            # ── high 置信度：自动映射 + 写入别名 ──
+            if high_conf:
+                print(f"[Master] LLM 高置信度识别 {len(high_conf)} 列:")
+                for col, info in high_conf.items():
+                    print(f"         「{col}」→ {info['field']}（{info['reason']}）")
+                    mem_add_col_alias(col, info["field"])
+
+            # ── low 置信度：交互式确认 ──
+            if low_conf:
+                print(f"[Master] 以下 {len(low_conf)} 列未能高置信度识别，需手动确认:")
+                _interactive_classify_columns(
+                    list(low_conf.keys()), master_df,
+                    {"field_mapping": {}, "composite_col": None,
+                     "target_col": None, "irrelevant_cols": [],
+                     "unrecognized_cols": list(low_conf.keys())},
+                )
+        else:
+            # 缺列但无候选列（列名太少）→ 全部进入交互
+            print(f"[Master] 缺少必要字段 {missing_master}，且无候选列，请手动确认")
+            # 这种情况很少见，先给出清晰错误然后尝试交互
+            _interactive_classify_columns(
+                missing_master, master_df,
+                {"field_mapping": {}, "composite_col": None,
+                 "target_col": None, "irrelevant_cols": [],
+                 "unrecognized_cols": missing_master},
+            )
+
+    # 运行管线（read_master 内部会应用 column_aliases 自动重命名）
     t0 = time.time()
     state = run_pipeline(
         master_path=opts.master,
@@ -679,6 +752,77 @@ if __name__ == "__main__":
             set_column_prompt_hook(None)
             print()
 
+            # ── 11. 主数据列推断（LLM 高置信度 → 自动映射）──
+            print("11. 主数据列推断（LLM 高置信度 → 自动映射）")
+            mem_reset()
+            from agent.schema_analyzer import set_inference_hook as set_infer_hook
+
+            # 准备异构列名的主数据：温度→做法, 产品名称规格明细→品名
+            master_infer_path = os.path.join(tmpdir, "master_infer.xlsx")
+            pd.DataFrame({
+                "产品名称规格明细": ["浅浅清茶", "珍珠奶茶"],
+                "杯型": ["中杯", "中杯"],
+                "温度": ["少冰", "热"],
+                "糖": ["七分糖", "无糖"],
+                "奶底": ["牛奶", "椰乳"],
+                "SOP代码": ["T240", "T180"],
+            }).to_excel(master_infer_path, index=False)
+            master_infer_out = os.path.join(tmpdir, "master_infer_out.xlsx")
+
+            # Mock LLM 推断
+            def mock_infer_master(candidate_cols, sample_data, missing_fields):
+                result = {}
+                for col in candidate_cols:
+                    if "温度" in col:
+                        result[col] = {"field": "temperature", "confidence": "high",
+                                       "reason": "样例值为标准冰温描述"}
+                    elif "产品名称" in col:
+                        result[col] = {"field": "product_name", "confidence": "high",
+                                       "reason": "包含完整商品名称信息"}
+                    else:
+                        result[col] = {"field": None, "confidence": "low",
+                                       "reason": "无法判断"}
+                return result
+
+            set_infer_hook(mock_infer_master)
+            # 同时设置列分类 hook 以覆盖可能的 low 置信度回退
+            set_column_prompt_hook(lambda col, sample: "ignore")
+
+            exit_code11 = run([
+                "-m", master_infer_path,
+                "-t", template_path,
+                "-o", master_infer_out,
+            ])
+            check(exit_code11 == 0, f"主数据列推断后正常执行（实际 {exit_code11}）")
+            # 验证 column_aliases 已写入
+            check(mem_get_col("温度") == "temperature", "别名: 温度→temperature")
+            check(mem_get_col("产品名称规格明细") == "product_name",
+                  "别名: 产品名称规格明细→product_name")
+            set_infer_hook(None)
+            set_column_prompt_hook(None)
+            mem_reset()
+            print()
+
+            # ── 12. 主数据推断后二次运行 → 别名命中免 LLM ──
+            print("12. 主数据列推断后二次运行 → 别名命中免 LLM")
+            # 先预热别名（模拟首次运行后）
+            from data.memory import add_column_alias as mem_add_ca
+            mem_reset()
+            mem_add_ca("温度", "temperature")
+            mem_add_ca("产品名称规格明细", "product_name")
+            hook_calls.clear()
+
+            exit_code12 = run([
+                "-m", master_infer_path,
+                "-t", template_path,
+                "-o", master_infer_out,
+            ])
+            check(exit_code12 == 0, f"二次运行正常（实际 {exit_code12}）")
+            check(len(hook_calls) == 0,
+                  f"别名命中 → 不触发交互（实际 {len(hook_calls)} 次）")
+            mem_reset()
+            print()
+
         finally:
             for f in [master_path, template_path, output_path,
                       output_path.replace(".xlsx", "_report.txt"),
@@ -691,7 +835,10 @@ if __name__ == "__main__":
                       os.path.join(tmpdir, "interactive_out_report.txt"),
                       os.path.join(tmpdir, "cross.xlsx"),
                       os.path.join(tmpdir, "cross_out.xlsx"),
-                      os.path.join(tmpdir, "cross_out_report.txt")]:
+                      os.path.join(tmpdir, "cross_out_report.txt"),
+                      os.path.join(tmpdir, "master_infer.xlsx"),
+                      os.path.join(tmpdir, "master_infer_out.xlsx"),
+                      os.path.join(tmpdir, "master_infer_out_report.txt")]:
                 if os.path.exists(f):
                     os.remove(f)
             os.rmdir(tmpdir)

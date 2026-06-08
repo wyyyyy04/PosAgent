@@ -31,6 +31,41 @@ MASTER_WILDCARD_COLUMNS = ["奶底"]
 # 主数据表可选字段（存在则保留）
 MASTER_OPTIONAL_COLUMNS = ["全信息", "SOP"]
 
+# canonical field → 主数据必要字段名 的逆向映射（供列别名匹配使用）
+CANONICAL_TO_MASTER_REQUIRED = {
+    "product_name": "品名",
+    "size": "杯型",
+    "temperature": "做法",
+    "sugar": "糖",
+}
+
+
+def _apply_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """根据 column_aliases 记忆自动重命名 DataFrame 的列。
+
+    流程：对每一列查询 get_column_alias(col_name)：
+      - 返回 canonical field 如 "temperature"
+      - 再查 CANONICAL_TO_MASTER_REQUIRED["temperature"] → "做法"
+      - 若 "做法" 尚不在 df.columns 中 → 将列重命名为 "做法"
+
+    目标：让「温度」这样的异构列名自动对齐到主数据校验所需的「做法」。
+    已在 memory 中标记为 "ignore" 的列不会重命名。
+
+    Returns:
+        重命名后的 DataFrame（原位修改 + 返回）。
+    """
+    from data.memory import get_column_alias
+
+    for col in list(df.columns):
+        alias = get_column_alias(col)
+        if alias is None or alias == "ignore":
+            continue
+        required_name = CANONICAL_TO_MASTER_REQUIRED.get(alias)
+        if required_name and required_name not in df.columns:
+            df.rename(columns={col: required_name}, inplace=True)
+
+    return df
+
 
 def read_excel(filepath: str, sheet_name=0) -> pd.DataFrame:
     """读取 Excel 文件，返回 DataFrame。
@@ -61,32 +96,45 @@ def read_excel(filepath: str, sheet_name=0) -> pd.DataFrame:
     return _normalize_df(df)
 
 
-def read_master(filepath: str, sheet_name=0) -> pd.DataFrame:
+def read_master(filepath: str, sheet_name=0, soft_validation: bool = False) -> pd.DataFrame:
     """读取主数据表，校验必要字段。
 
     必要字段: 品名, 杯型, 做法, 糖（缺一报错）
     可通配字段: 奶底（缺失时自动注入空列，触发通配逻辑）
     可选字段: 全信息, SOP
 
+    soft_validation=True 时：
+      - 先应用 column_aliases 自动重命名
+      - 缺列不抛异常，而是标记在 df.attrs['_missing_required'] 上
+      这是为了允许上层（main.py）在送入管线前做 LLM 推断 + 交互兜底。
+
     Args:
         filepath: 主数据表 Excel 路径。
         sheet_name: 工作表名或索引。
+        soft_validation: True 时不抛异常，标记缺失列。
 
     Returns:
         pd.DataFrame，列名已 strip。
 
     Raises:
-        ValueError: 缺少必要字段。
+        ValueError: soft_validation=False 且缺少必要字段。
     """
     df = read_excel(filepath, sheet_name=sheet_name)
 
-    # ── 检测必要字段 ──
+    # ── Step 1: 应用 column_aliases 记忆自动重命名 ──
+    _apply_column_aliases(df)
+
+    # ── Step 2: 检测必要字段 ──
     missing_required = [c for c in MASTER_REQUIRED_COLUMNS if c not in df.columns]
+
     if missing_required:
-        raise ValueError(
-            f"主数据表缺少必要字段: {missing_required}\n"
-            f"当前列名: {list(df.columns)}"
-        )
+        if soft_validation:
+            df.attrs["_missing_required"] = missing_required
+        else:
+            raise ValueError(
+                f"主数据表缺少必要字段: {missing_required}\n"
+                f"当前列名: {list(df.columns)}"
+            )
 
     # ── 检测可通配字段：缺失时注入空列 ──
     for col in MASTER_WILDCARD_COLUMNS:
@@ -252,8 +300,53 @@ if __name__ == "__main__":
         check(df_no_milk.iloc[0]["品名"] == "测试商品", "其他列正常")
         print()
 
-        # ── 8. 缺必要字段（做法）→ 仍抛异常 ──
-        print("8. 缺必要字段（做法）→ 仍抛异常")
+        # ── 9. column_aliases 自动重命名 ──
+        print("9. column_aliases 自动重命名（温度 → 做法）")
+        from data.memory import reset_memory, add_column_alias
+        reset_memory()
+        alias_path = os.path.join(tmpdir, "alias_master.xlsx")
+        pd.DataFrame({
+            "品名": ["测试商品"],
+            "杯型": ["中杯"],
+            "温度": ["少冰"],     # 异构列名：用户写了「温度」而非「做法」
+            "糖":   ["七分糖"],
+        }).to_excel(alias_path, index=False)
+        # 预热记忆：告诉系统「温度」→ canonical temperature → 映射到主数据「做法」
+        add_column_alias("温度", "temperature")
+        df_alias = read_master(alias_path)
+        check("做法" in df_alias.columns, "「温度」被自动重命名为「做法」")
+        check("温度" not in df_alias.columns, "原列名「温度」不再存在")
+        check(df_alias.iloc[0]["做法"] == "少冰", "重命名后数据保留正确")
+        reset_memory()
+        print()
+
+        # ── 10. soft_validation 模式 → 不抛异常，标记缺失列 ──
+        print("10. soft_validation 模式 → 标记缺失列，不抛异常")
+        reset_memory()
+        soft_path = os.path.join(tmpdir, "soft_master.xlsx")
+        pd.DataFrame({
+            "品名": ["测试"],
+            "杯型": ["中杯"],
+            "Unnamed: 2": [""],
+            "温度": ["少冰"],
+            "糖":   ["七分糖"],
+            "代码": ["T240"],
+        }).to_excel(soft_path, index=False)
+        df_soft = read_master(soft_path, soft_validation=True)
+        check("做法" not in df_soft.columns, "「做法」列确实不存在")
+        check(df_soft.attrs.get("_missing_required") == ["做法"],
+              f"标记缺失字段: {df_soft.attrs.get('_missing_required')}")
+        # 硬校验模式仍抛异常
+        try:
+            read_master(soft_path, soft_validation=False)
+            check(False, "硬校验模式下缺列应抛 ValueError")
+        except ValueError as e:
+            check("做法" in str(e), f"硬校验仍报错: {e}")
+        reset_memory()
+        print()
+
+        # ── 11. 缺必要字段（做法）→ 仍抛异常 ──
+        print("11. 缺必要字段（做法）→ 仍抛异常（硬校验）")
         bad_required_path = os.path.join(tmpdir, "bad_required.xlsx")
         pd.DataFrame({
             "品名": ["测试"],
@@ -273,7 +366,9 @@ if __name__ == "__main__":
                   os.path.join(tmpdir, "bad_master.xlsx"),
                   os.path.join(tmpdir, "strip.xlsx"),
                   os.path.join(tmpdir, "no_milk_master.xlsx"),
-                  os.path.join(tmpdir, "bad_required.xlsx")]:
+                  os.path.join(tmpdir, "bad_required.xlsx"),
+                  os.path.join(tmpdir, "alias_master.xlsx"),
+                  os.path.join(tmpdir, "soft_master.xlsx")]:
             if os.path.exists(f):
                 os.remove(f)
         os.rmdir(tmpdir)

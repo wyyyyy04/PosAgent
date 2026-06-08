@@ -448,6 +448,149 @@ def analyze(
     return result
 
 
+# ── 主数据列推断 ────────────────────────────────────────────────
+
+MASTER_INFERENCE_SYSTEM = """\
+You are a data schema matching expert. Given candidate columns from a master spreadsheet and a list of required but unfound canonical fields, determine which candidate column matches which canonical field.
+
+## Canonical Fields (for reference)
+- product_name: 商品/菜品名称
+- size: 规格/杯型
+- milk_base: 奶底
+- temperature: 温度/做法 (ice level, e.g. 正常冰/少冰/去冰/热/温热)
+- sugar: 糖度 (sugar level, e.g. 全糖/七分糖/五分糖/无糖)
+- tea_base: 茶底
+
+## Output Format
+Return ONLY a JSON object. Each candidate column name is a key. Value is an object with:
+- field: canonical field name (or null if cannot match)
+- confidence: "high" (sure) or "low" (guess)
+- reason: brief one-line explanation in Chinese
+
+Example:
+{"温度": {"field": "temperature", "confidence": "high", "reason": "样例值为标准冰温描述"}}"""
+
+MASTER_INFERENCE_USER = """\
+## Required Canonical Fields (missing from spreadsheet)
+{missing_fields}
+
+## Candidate Columns (with up to 5 sample values each)
+{candidate_samples}
+
+Match each candidate column to one of the required fields above. If a column clearly doesn't match any field, set field=null and confidence="low". Only match to fields listed in "Required Canonical Fields"."""
+
+# LLM 推断 hook（测试用）
+_inference_hook: Optional[callable] = None
+
+
+def set_inference_hook(hook: Optional[callable]) -> None:
+    """注入自定义主数据列推断回调（用于测试）。设为 None 恢复默认。"""
+    global _inference_hook
+    _inference_hook = hook
+
+
+def infer_master_columns(
+    candidate_cols: List[str],
+    sample_data: dict,
+    missing_fields: List[str],
+) -> Dict[str, Dict[str, str]]:
+    """使用 LLM 推断候选列与缺失 canonical 字段的匹配关系。
+
+    Args:
+        candidate_cols: 候选列名列表（未被现有校验覆盖的列）。
+        sample_data: {col_name: [sample_value, ...]} 每列最多 5 个样例值。
+        missing_fields: 缺失的 canonical 字段名列表
+            （如 ["temperature"] — 即 MASTER_REQUIRED_COLUMNS 中未找到的）。
+
+    Returns:
+        {col_name: {"field": "temperature"|None, "confidence": "high"|"low", "reason": "..."}}
+        只有高置信度的列应该自动映射；低置信度/field=null 应交由交互确认。
+    """
+    if not candidate_cols or not missing_fields:
+        return {}
+
+    # ── 测试模式：优先使用注入的 hook ──
+    if _inference_hook is not None:
+        return _inference_hook(candidate_cols, sample_data, missing_fields)
+
+    # ── 构建候选列样例 ──
+    candidate_lines = []
+    for col in candidate_cols:
+        vals = sample_data.get(col, [])
+        val_str = ", ".join(str(v) for v in vals) if vals else "(空)"
+        candidate_lines.append(f"  Column「{col}」: {val_str}")
+
+    # ── 构建缺失字段描述 ──
+    FIELD_DESCRIPTIONS = {
+        "product_name": "product_name: 商品/菜品名称",
+        "size": "size: 规格/杯型",
+        "milk_base": "milk_base: 奶底（如 牛奶/燕麦奶/厚乳/椰乳）",
+        "temperature": "temperature: 温度/做法（如 正常冰/少冰/去冰/热/温热）",
+        "sugar": "sugar: 糖度（如 全糖/七分糖/五分糖/无糖）",
+        "tea_base": "tea_base: 茶底（如 红茶/绿茶/乌龙茶）",
+    }
+    missing_lines = [
+        f"  - {FIELD_DESCRIPTIONS.get(f, f)}"
+        for f in missing_fields
+    ]
+
+    # ── 调用 LLM ──
+    user_prompt = MASTER_INFERENCE_USER.format(
+        missing_fields="\n".join(missing_lines),
+        candidate_samples="\n".join(candidate_lines),
+    )
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": MASTER_INFERENCE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=512,
+        )
+        raw = response.choices[0].message.content or "{}"
+    except Exception:
+        # LLM 不可用 → 全部返回低置信度
+        result = {}
+        for col in candidate_cols:
+            result[col] = {"field": None, "confidence": "low", "reason": "LLM 调用失败"}
+        return result
+
+    # ── 解析 ──
+    try:
+        data = json.loads(_extract_json(raw))
+    except json.JSONDecodeError:
+        # 无法解析 → 全部低置信度
+        result = {}
+        for col in candidate_cols:
+            result[col] = {"field": None, "confidence": "low", "reason": "LLM 返回无法解析"}
+        return result
+
+    # ── 标准化输出格式 ──
+    result = {}
+    for col in candidate_cols:
+        entry = data.get(col)
+        if isinstance(entry, dict):
+            field = entry.get("field")
+            confidence = entry.get("confidence", "low")
+            reason = entry.get("reason", "")
+            # 仅接受 high + 合法 canonical 字段 的组合
+            if confidence == "high" and field in missing_fields:
+                result[col] = {"field": field, "confidence": "high", "reason": reason}
+            elif field in missing_fields:
+                result[col] = {"field": field, "confidence": "low", "reason": reason}
+            else:
+                result[col] = {"field": None, "confidence": "low",
+                               "reason": reason or "LLM 未给出有效匹配"}
+        else:
+            result[col] = {"field": None, "confidence": "low", "reason": "LLM 未返回此列"}
+
+    return result
+
+
 def analyze_from_dataframe(
     df: "pd.DataFrame",
     sample_rows: int = 3,
@@ -810,6 +953,52 @@ if __name__ == "__main__":
           "unrecognized_cols 是 list")
     check(set(result18["unrecognized_cols"]) == {"B", "C"},
           f"B, C 未识别（实际 {result18['unrecognized_cols']}）")
+    print()
+
+    # ── 19. infer_master_columns（Mock hook 模式）──
+    print("19. infer_master_columns（LLM 主数据列推断）")
+
+    def mock_inference(candidate_cols, sample_data, missing_fields):
+        """Mock LLM: 温度→temperature(high), Unnamed→null(low)"""
+        result = {}
+        for col in candidate_cols:
+            if "温度" in col or "做法" in col:
+                result[col] = {"field": "temperature", "confidence": "high",
+                               "reason": "样例值为冰温描述"}
+            elif "Unnamed" in col:
+                result[col] = {"field": None, "confidence": "low",
+                               "reason": "列数据为空"}
+            else:
+                result[col] = {"field": None, "confidence": "low",
+                               "reason": "无法判断"}
+        return result
+
+    set_inference_hook(mock_inference)
+
+    sample = {"温度": ["少冰", "去冰", "正常冰", "热", "温热"],
+              "Unnamed: 2": ["", ""],
+              "代码": ["T240", "T265"]}
+
+    result19 = infer_master_columns(
+        ["温度", "Unnamed: 2", "代码"],
+        sample,
+        ["temperature"],
+    )
+    check(result19["温度"]["confidence"] == "high",
+          f"温度→high（实际 {result19['温度']['confidence']}）")
+    check(result19["温度"]["field"] == "temperature",
+          f"温度→temperature（实际 {result19['温度']['field']}）")
+    check(result19["Unnamed: 2"]["confidence"] == "low",
+          f"Unnamed→low（实际 {result19['Unnamed: 2']['confidence']}）")
+    check(result19["Unnamed: 2"]["field"] is None,
+          "Unnamed: 2 → field=None")
+    check(result19["代码"]["confidence"] == "low",
+          "无法判断 → low")
+    # 空输入
+    check(infer_master_columns([], {}, []) == {}, "空候选/空缺失 → 空结果")
+    check(infer_master_columns(["A"], {"A": ["x"]}, []) == {}, "空缺失字段 → 空结果")
+
+    set_inference_hook(None)
     print()
 
     # 清理
