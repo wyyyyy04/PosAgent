@@ -419,25 +419,55 @@ REPL 内支持以下斜杠指令：
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
 | 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
-| Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、校验报告 | `d391bee` |
-| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式 | `852a4e2` |
-| CLI 入口 | main.py | ✅ 已完成 | 12/12 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、结果摘要、错误处理 | `a712c40` |
+| Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
+| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式、**console_summary 控制台输出** | `fec7ffe` |
+| CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**批量模式自动跳过交互**、**主数据缺列 LLM 推断 + 置信度分流 + 列别名自动映射**、主数据列推断中文字段名→英文 canonical 翻译 | `fec7ffe` |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
 
 | 指标 | 数值 |
 |------|------|
-| 总行数 | 96 |
-| 完全匹配 | 40 行 |
-| **准确率** | **50.0%** |
-| 低置信度 | 48 行 |
+| 总行数 | 870 |
+| 高置信匹配 | 775 行 (89.1%) |
+| 需要确认 | 95 行 (10.9%) |
 | 匹配失败 | 0 行 |
+| API 调用 | 1 次（仅 Schema Analyzer，二次运行缓存命中为 0 次） |
+| 耗时 | ~0.8s（缓存命中） |
 
-**48 条低置信度原因分析：**
-- 48 条：模板奶底=`燕麦奶`，但主数据 53 行奶底全部为 `牛奶`（数据覆盖不全）
+**95 条低置信度原因分析：**
+- 48 条：商品名在主数据中未找到（模板有、主数据无的商品）
+- 20 条：主数据中缺少温度「温热」「热」或规格「大杯」
+- 10 条：主数据中缺少规格「果蔬瓶」
+- 其余：糖度/温度个别不匹配
 
-> 结论：糖度后缀格式问题已通过 `normalize_token()` 清洗解决（+8 行 → HIGH）。剩余低置信度均为数据覆盖不全，非匹配引擎 bug。
+> 结论：所有低置信度均为数据覆盖不全（主数据 vs 模板商品/属性覆盖差异），非匹配引擎 bug。
+
+### 控制台摘要报告（`fec7ffe`）
+- **格式**：控制台输出按产品分组的简洁表格，详细日志仅写入文件
+- **报告结构**：摘要（✅高置信/⚠️需确认/❌完全失败）→ 低置信度明细（产品|原因|行数）→ 文件路径提示
+- **原因聚合**：同一产品多个失败原因合并为一行，`failure_reason` 自动中文映射
+- **匹配结果**：新增 `template_product_name` 字段，支持按产品名分组
+
+### 批量模式 + 交互阻塞修复（`9219229`）
+- **问题**：CLI 带参数调用时仍进入交互提示，导致 `input()` 阻塞或死循环
+- **修复**：新增 `_batch_mode` 标志，`python main.py -m ... -t ... -o ...` 自动跳过所有交互
+- **影响范围**：
+  - Schema 分析未识别列 → 批量模式下自动标记 ignore
+  - 主数据推断低置信度列 → 批量模式下打印 warning 跳过
+  - Token Classifier 未知词 → 批量模式下注入兜底回调（标记 UNKNOWN 继续）
+- **LLM 字段名修正**：`missing_master`（中文如 `做法`）传入 LLM 前翻译为英文 canonical 名（如 `temperature`），确保 `_apply_column_aliases` 正确映射
+
+### 主数据缺列 LLM 推断（`c053bfb`）
+- **功能**：主数据列名不标准时（如 `温度`≠`做法`、`配料`≠`SOP`），调用 LLM 推断列语义
+- **置信度分流**：高置信度自动映射并写入 column_aliases 长期记忆；低置信度交互确认（批量模式下自动跳过）
+- **效果**：异名列（如 `温度`）自动对齐到标准列名（`做法`），无需手动重命名 Excel
+
+### Schema 交互兜底 + 模板指纹缓存（`ad3d898`）
+- **列别名记忆**：跨模板共享的列名→canonical 字段映射，存储在 `~/.pos_agent/memory.json`
+- **模板指纹缓存**：同一模板第二次运行时跳过 LLM Schema 分析 + 交互
+- **三级缓存**：进程内缓存 → 磁盘记忆 → LLM 调用
+- **效果**：二次运行 API=0, 0.1s（**无限倍提速**，准确率不变）
 
 ### 安全性修复（上一轮）
 - LLM 输入隔离：Schema Analyzer 不再接收完整行数据，仅接收列名+去重样例值
@@ -452,19 +482,10 @@ REPL 内支持以下斜杠指令：
 
 ### 长期记忆 + 未知词兜底（本轮）
 - **新增** `data/memory.py`：JSON 持久化存储（`~/.pos_agent/memory.json`），不入 git
-- **存储结构**：`token_aliases`（未知词→类型映射）、`template_rules`、`match_corrections` 三类
+- **存储结构**：`token_aliases`（未知词→类型映射）、`template_rules`、`match_corrections`、`column_aliases`（列名映射）
 - **三级兜底机制**：标准词典 → 长期记忆 → 交互式确认（同词每进程仅问一次）
 - **交互确认**：三个选项（加入词典/标 UNKNOWN 继续/跳过此行）、支持 mock hook 自动化测试
 - **Token Classifier 自测更新**：新增记忆命中、会话缓存、跳过行等场景（40/40 passed）
-
-### 模板规则缓存（本轮 `cbf30ae`）
-- **目标**：同一模板第二次运行时跳过 LLM Schema 分析，API 调用从 1 次降到 0 次
-- **三级缓存架构**：进程内缓存（SHA256）→ 磁盘记忆（MD5 指纹）→ LLM 调用
-- **指纹生成**：模板所有列名排序后用逗号拼接，取 MD5 摘要（列名顺序无关）
-- **CLI 输出区分**：
-  - 缓存命中：`[Schema] 缓存命中：模板指纹 c2743182...（跳过 LLM）`
-  - 新模板：`[Schema] 新模板，调用 LLM 分析...`
-- **testdata 验证**：首轮 API=1, 3.3s → 次轮 API=0, 0.1s（**33 倍提速**，准确率不变 50.0%）
 
 ### /指令系统 REPL（本轮 `a27f660`）
 - **入口**：`python main.py` 无参数启动 REPL 交互模式
@@ -473,7 +494,7 @@ REPL 内支持以下斜杠指令：
 - **安全机制**：删除/清空操作需确认（delete: y/n, reset: yes/不可撤销）
 - **REPL 内 /run**：复用 main.run()，无需退出即可执行映射任务
 
-### 主数据缺列自动通配（本轮 `6679745`）
+### 主数据缺列自动通配（`6679745`）
 - **改动**：`master_to_canonical()` 读取主数据后检测实际存在的列
 - **WILDCARD_DIMENSIONS**（奶底/茶底）列不存在：打印 `[INFO]` 日志，全行设 None 触发通配，不报错不交互
 - **REQUIRED_DIMENSIONS**（规格/做法/糖）列不存在：抛出 `ValueError`，这是真正的数据问题
