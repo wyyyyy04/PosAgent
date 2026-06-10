@@ -89,6 +89,9 @@ FIELD_OPTIONS = [
 # 交互 hook（用于测试时注入自定义回调）
 _column_prompt_hook = None
 
+# 批量模式标志：CLI 带参数调用时为 True（不进入交互），REPL 模式为 False
+_batch_mode = False
+
 
 def set_column_prompt_hook(hook) -> None:
     """注入自定义列分类回调（用于自动化测试）。
@@ -98,14 +101,22 @@ def set_column_prompt_hook(hook) -> None:
     _column_prompt_hook = hook
 
 
+def set_batch_mode(enabled: bool) -> None:
+    """设置批量模式标志。True 时所有交互提示自动跳过（CLI 模式）。"""
+    global _batch_mode
+    _batch_mode = enabled
+
+
 def _interactive_classify_columns(
     unrecognized_cols: list,
     template_df: "pd.DataFrame",
     schema_result: dict,
 ) -> None:
-    """交互式引导用户手动分类未识别列。
+    """引导用户手动分类未识别列（交互模式）或自动跳过（CLI 模式）。
 
-    对每个未识别列展示列名 + 样例值，用户选择 canonical 字段映射。
+    交互模式（TTY）：展示列名 + 样例值，用户选择 canonical 字段映射。
+    CLI 模式（非 TTY）：打印警告，全部标记为 ignore，不阻塞执行。
+
     选择结果写入 column_aliases 长期记忆和当前 schema_result。
 
     Args:
@@ -113,8 +124,24 @@ def _interactive_classify_columns(
         template_df: 模板 DataFrame（用于提取样例值）。
         schema_result: 当前 schema 分析结果（原地修改）。
     """
+    # ── 批量模式（CLI 带参数）── 自动跳过，不阻塞 ──
+    if _batch_mode:
+        col_list = "、".join(str(c) for c in unrecognized_cols)
+        print(
+            f"[WARNING] 批量模式，以下 {len(unrecognized_cols)} 个列无法自动识别，"
+            f"将跳过: {col_list}"
+        )
+        print("          如需手动指定列映射，请使用 REPL 模式: python main.py（无参数启动）")
+        for col in unrecognized_cols:
+            schema_result["irrelevant_cols"].append(col)
+        schema_result["unrecognized_cols"] = []
+        return
+
+    # ── 交互模式（REPL / TTY）──
     import pandas as pd
     from data.memory import add_column_alias
+
+    _skipped_count = 0
 
     for col in unrecognized_cols:
         # 提取样例值
@@ -141,7 +168,13 @@ def _interactive_classify_columns(
                         field_name, _ = FIELD_OPTIONS[choice]
                         break
                     print(f"  [错误] 请输入 1-{len(FIELD_OPTIONS)} 之间的数字")
-                except (ValueError, EOFError):
+                except EOFError:
+                    # stdin 意外关闭 → 安全兜底，标记为 ignore 并跳过后续所有列
+                    print(f"  [WARNING] 输入流已关闭，剩余列将全部标记为 ignore")
+                    field_name = "ignore"
+                    _skipped_count = len(unrecognized_cols) - unrecognized_cols.index(col)
+                    break
+                except ValueError:
                     print(f"  [错误] 请输入有效数字")
 
         # 持久化列别名
@@ -163,6 +196,12 @@ def _interactive_classify_columns(
                 schema_result["field_mapping"][col] = field_name
         else:
             schema_result["field_mapping"][col] = field_name
+
+        # 如果触发了批量跳过，剩余列直接标记为 ignore
+        if _skipped_count > 0:
+            for remaining_col in unrecognized_cols[-_skipped_count + 1:]:
+                schema_result["irrelevant_cols"].append(remaining_col)
+            break
 
     schema_result["unrecognized_cols"] = []
 
@@ -338,7 +377,19 @@ def run(args: Optional[list] = None) -> int:
                 sample_data[col] = vals
 
             # LLM 推断
-            inference = infer_master_columns(candidate_cols, sample_data, missing_master)
+            # 将 missing_master 的中文名翻译为英文 canonical 名，
+            # 确保 LLM 返回英文名（如 "temperature"），后续
+            # _apply_column_aliases 才能通过 CANONICAL_TO_MASTER_REQUIRED 映射回中文列名
+            _MASTER_CN_TO_CANONICAL = {
+                "品名": "product_name",
+                "杯型": "size",
+                "做法": "temperature",
+                "糖": "sugar",
+            }
+            canonical_missing = [
+                _MASTER_CN_TO_CANONICAL.get(f, f) for f in missing_master
+            ]
+            inference = infer_master_columns(candidate_cols, sample_data, canonical_missing)
 
             # 按置信度分流
             high_conf = {}
@@ -356,25 +407,53 @@ def run(args: Optional[list] = None) -> int:
                     print(f"         「{col}」→ {info['field']}（{info['reason']}）")
                     mem_add_col_alias(col, info["field"])
 
-            # ── low 置信度：交互式确认 ──
+            # ── low 置信度：批量模式自动跳过 / 交互模式手动确认 ──
             if low_conf:
-                print(f"[Master] 以下 {len(low_conf)} 列未能高置信度识别，需手动确认:")
+                if _batch_mode:
+                    col_list = "、".join(str(c) for c in low_conf.keys())
+                    print(
+                        f"[WARNING] 以下 {len(low_conf)} 列未能高置信度识别，"
+                        f"批量模式下将跳过: {col_list}"
+                    )
+                    for col, info in low_conf.items():
+                        print(f"           「{col}」→ {info.get('reason', '无法判断')}")
+                    print(
+                        "          如需手动指定列映射，请使用 REPL 模式: "
+                        "python main.py（无参数启动）"
+                    )
+                else:
+                    print(f"[Master] 以下 {len(low_conf)} 列未能高置信度识别，需手动确认:")
+                    _interactive_classify_columns(
+                        list(low_conf.keys()), master_df,
+                        {"field_mapping": {}, "composite_col": None,
+                         "target_col": None, "irrelevant_cols": [],
+                         "unrecognized_cols": list(low_conf.keys())},
+                    )
+        else:
+            # 缺列但无候选列（列名太少）
+            missing_str = "、".join(str(c) for c in missing_master)
+            if _batch_mode:
+                print(
+                    f"[WARNING] 缺少必要字段 {missing_master}，且无候选列可推断，"
+                    f"将跳过: {missing_str}"
+                )
+                print(
+                    "          如需手动指定列映射，请使用 REPL 模式: "
+                    "python main.py（无参数启动）"
+                )
+            else:
+                print(f"[Master] 缺少必要字段 {missing_master}，且无候选列，请手动确认")
                 _interactive_classify_columns(
-                    list(low_conf.keys()), master_df,
+                    missing_master, master_df,
                     {"field_mapping": {}, "composite_col": None,
                      "target_col": None, "irrelevant_cols": [],
-                     "unrecognized_cols": list(low_conf.keys())},
+                     "unrecognized_cols": missing_master},
                 )
-        else:
-            # 缺列但无候选列（列名太少）→ 全部进入交互
-            print(f"[Master] 缺少必要字段 {missing_master}，且无候选列，请手动确认")
-            # 这种情况很少见，先给出清晰错误然后尝试交互
-            _interactive_classify_columns(
-                missing_master, master_df,
-                {"field_mapping": {}, "composite_col": None,
-                 "target_col": None, "irrelevant_cols": [],
-                 "unrecognized_cols": missing_master},
-            )
+
+    # 批量模式：注入 Token Classifier 兜底回调，避免未知词交互阻塞
+    if _batch_mode:
+        from agent.token_classifier import set_prompt_hook as tc_set_prompt_hook
+        tc_set_prompt_hook(lambda word, context: {"action": "unknown"})
 
     # 运行管线（read_master 内部会应用 column_aliases 自动重命名）
     t0 = time.time()
@@ -396,28 +475,29 @@ def run(args: Optional[list] = None) -> int:
         print(f"      耗时: {elapsed:.1f}s")
         return 1
 
-    # 输出摘要
-    total = len(state.match_results)
-    high = sum(1 for r in state.match_results if r.get("confidence") == "HIGH")
-    low = total - high
+    # 输出摘要报告
     api_calls = state.api_call_count if hasattr(state, 'api_call_count') else "?"
+    print(f"\n[OK] 映射完成!  API 调用: {api_calls} 次  总耗时: {elapsed:.1f}s\n")
 
-    print(f"\n[OK] 映射完成!")
-    print(f"     API 调用: {api_calls} 次")
-    print(f"     总耗时:   {elapsed:.1f}s")
-    print(f"     总行数:   {total}")
-    print(f"     高置信度: {high} ({100*high/total:.1f}%)")
-    print(f"     低置信度: {low} ({100*low/total:.1f}%)")
+    if state.report:
+        # 使用 buffer 写入以支持 emoji（Windows GBK 控制台兼容）
+        try:
+            sys.stdout.buffer.write((state.report + "\n").encode("utf-8"))
+            sys.stdout.buffer.flush()
+        except (UnicodeError, AttributeError):
+            print(state.report)
+    else:
+        # 兜底摘要（旧版 workflow 可能不生成 report）
+        total = len(state.match_results)
+        high = sum(1 for r in state.match_results if r.get("confidence") == "HIGH")
+        low = total - high
+        print(f"     总行数:   {total}")
+        print(f"     高置信度: {high} ({100*high/total:.1f}%)")
+        print(f"     低置信度: {low} ({100*low/total:.1f}%)")
 
-    if low > 0:
-        print(f"\n     [!] {low} 行匹配置信度较低，详见校验报告:")
-        print(f"     {report_path}")
-
-        # 列出低置信度行摘要
-        for i, r in enumerate(state.match_results):
-            if r.get("confidence") != "HIGH":
-                score = r.get("product_score", 0)
-                print(f"       - 行 {i+1}: 分数={score:.1f}, 类型={r.get('match_type', '?')}")
+    if state.report and state.report_path:
+        # 报告已在 workflow 写入文件，确认路径
+        pass
 
     # ── 展示本次新增的记忆条目 ──
     from data.memory import get_new_tokens
@@ -853,4 +933,6 @@ if __name__ == "__main__":
         from cli.repl import repl_loop
         repl_loop()
     else:
+        # CLI 批量模式：禁用所有交互提示
+        set_batch_mode(True)
         sys.exit(run())

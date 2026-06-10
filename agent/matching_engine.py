@@ -9,6 +9,7 @@ Matching Engine — 商品名精确匹配 + 属性组合匹配 + 低置信度兜
 4. 兜底：填入最佳猜测，标注 LOW_CONFIDENCE
 """
 
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from rapidfuzz import fuzz
@@ -36,6 +37,46 @@ def _empty(val) -> bool:
     if isinstance(val, str) and val.strip() == "":
         return True
     return False
+
+
+def _infer_failure_reason(
+    product_score: float,
+    unmatched_attrs: List[str],
+    template_row: Dict[str, Any],
+) -> str:
+    """从匹配结果推断 LOW_CONFIDENCE 的失败原因。
+
+    优先级：
+      1. 商品名分数低于阈值 → PRODUCT_NOT_FOUND
+      2. 属性不匹配 → 按 milk_base > size > temperature > sugar > tea_base 顺序，
+         取第一个不匹配属性，附带模板中的实际值（用于报告展示）。
+
+    Args:
+        product_score: 商品名匹配分数。
+        unmatched_attrs: 不匹配的属性列表。
+        template_row: 模板 canonical 行（用于提取不匹配属性的实际值）。
+
+    Returns:
+        失败原因字符串，格式为 "REASON_CODE" 或 "REASON_CODE:extra_value"。
+        HIGH 置信度应传空字符串，调用方自行处理。
+    """
+    threshold = config.MATCHING_CONFIG.get("product_name_threshold", 90)
+
+    # 商品名分数不足 → 未找到
+    if product_score < threshold:
+        return "PRODUCT_NOT_FOUND"
+
+    # 属性不匹配 → 按优先级取第一个
+    priority_fields = ["milk_base", "size", "temperature", "sugar", "tea_base"]
+    for field in priority_fields:
+        if field in unmatched_attrs:
+            extra = str(template_row.get(field, "") or "").strip()
+            if extra:
+                return f"{field.upper()}_NOT_FOUND:{extra}"
+            return f"{field.upper()}_NOT_FOUND"
+
+    # 兜底
+    return "UNKNOWN"
 
 
 # ── 商品名匹配 ────────────────────────────────────────────────
@@ -156,6 +197,7 @@ def match_single(
             "master_index": -1,
             "matched_attributes": [],
             "unmatched_attributes": REQUIRED_DIMENSIONS[:],
+            "failure_reason": "PRODUCT_NOT_FOUND",
         }
 
     master_names = [str(m.get("product_name", "") or "").strip() for m in master_rows]
@@ -169,10 +211,14 @@ def match_single(
         if low_threshold <= scores[i] < threshold
     ]
 
-    def _make_result(master_idx, score, mtype, confidence, matched, unmatched):
+    def _make_result(master_idx, score, mtype, confidence, matched, unmatched,
+                     failure_reason=None):
         sop = ""
         if 0 <= master_idx < len(master_rows):
             sop = str(master_rows[master_idx].get("sop", "") or "")
+        # 自动推断 failure_reason（仅 LOW_CONFIDENCE）
+        if failure_reason is None and confidence == LOW_CONFIDENCE:
+            failure_reason = _infer_failure_reason(score, unmatched, template_row)
         return {
             "sop": sop,
             "confidence": confidence,
@@ -181,6 +227,7 @@ def match_single(
             "master_index": master_idx,
             "matched_attributes": matched,
             "unmatched_attributes": unmatched,
+            "failure_reason": failure_reason or "",
         }
 
     # ── Step 1: 高置信度候选 + 属性过滤 ──
@@ -313,50 +360,140 @@ def match(
 
 # ── 报告生成 ──────────────────────────────────────────────────
 
+# ── 失败原因中文映射 ──────────────────────────────────────────────
+
+_REASON_CN_MAP = {
+    "MILK_BASE_NOT_FOUND": "{extra}规格在主数据中缺失",
+    "PRODUCT_NOT_FOUND": "商品名称在主数据中未找到",
+    "SIZE_NOT_FOUND": "规格在主数据中缺失",
+    "TEMPERATURE_NOT_FOUND": "温度/做法在主数据中缺失",
+    "SUGAR_NOT_FOUND": "糖度在主数据中缺失",
+    "TEA_BASE_NOT_FOUND": "茶底在主数据中缺失",
+}
+
+_REASON_SUGGESTION_MAP = {
+    "MILK_BASE_NOT_FOUND": "补充 {extra} 相关 SOP 到主数据表",
+    "PRODUCT_NOT_FOUND": "检查商品名称是否有错别字，或补充主数据表",
+}
+
+
+def _parse_failure_reason(reason: str) -> Tuple[str, str]:
+    """解析 failure_reason，分离枚举码和附加值。
+
+    Args:
+        reason: 格式为 "CODE" 或 "CODE:extra" 的失败原因字符串。
+
+    Returns:
+        (code, extra) 元组。extra 为空字符串表示无附加值。
+    """
+    if ":" in reason:
+        code, extra = reason.split(":", 1)
+        return code, extra
+    return reason, ""
+
+
+def _format_top_reason(reason: str, count: int) -> Tuple[str, str]:
+    """格式化主要原因的中文描述和建议。
+
+    Args:
+        reason: failure_reason 原始值（如 "MILK_BASE_NOT_FOUND:燕麦奶"）。
+        count: 该原因出现的行数。
+
+    Returns:
+        (display, suggestion) 元组。display 为 "原因描述（N 行）"，
+        suggestion 为建议文本，无建议时为空字符串。
+    """
+    code, extra = _parse_failure_reason(reason)
+
+    template = _REASON_CN_MAP.get(code)
+    if template is None:
+        # 未知原因 → 直接输出原始值
+        display = f"{reason}（{count} 行）"
+        return display, ""
+
+    display = template.format(extra=extra) if "{extra}" in template else template
+    display = f"{display}（{count} 行）"
+
+    suggestion_tpl = _REASON_SUGGESTION_MAP.get(code, "")
+    suggestion = suggestion_tpl.format(extra=extra) if suggestion_tpl and "{extra}" in suggestion_tpl else suggestion_tpl
+
+    return display, suggestion
+
+
 def generate_report(
     match_results: List[Dict[str, Any]],
 ) -> str:
-    """生成匹配校验报告，汇总所有低置信度行。
+    """生成面向用户的匹配摘要报告。
+
+    输出中文分级的摘要，展示高置信度/需要确认/完全失败的行数，
+    并自动聚合最常见失败原因及建议。摘要下方附详细日志供调试。
 
     Args:
         match_results: match() 返回的结果列表。
 
     Returns:
-        格式化的报告文本。
+        格式化的报告文本（用于终端打印和文件写入）。
     """
-    low_conf_rows = [
-        (i, r)
-        for i, r in enumerate(match_results)
-        if r["confidence"] == LOW_CONFIDENCE
-    ]
+    total = len(match_results)
+    high = sum(1 for r in match_results if r.get("confidence") == HIGH)
+    low = sum(1 for r in match_results if r.get("confidence") == LOW_CONFIDENCE)
+    failed = total - high - low
 
     lines = []
-    lines.append("=" * 60)
-    lines.append("POS Template Mapping Report")
-    lines.append("=" * 60)
-    lines.append(f"总行数: {len(match_results)}")
-    lines.append(f"高置信度: {len(match_results) - len(low_conf_rows)}")
-    lines.append(f"低置信度: {len(low_conf_rows)}")
+    # ── 摘要部分 ──
+    lines.append("=" * 56)
+    lines.append(f"本次映射完成，共 {total} 行")
     lines.append("")
 
-    if low_conf_rows:
-        lines.append("-" * 60)
-        lines.append("低置信度行详情")
-        lines.append("-" * 60)
-        for i, r in low_conf_rows:
-            lines.append(f"  行 {i + 1}:")
-            lines.append(f"    匹配类型: {r['match_type']}")
-            lines.append(f"    商品名分数: {r['product_score']:.1f}")
-            lines.append(f"    SOP: {r['sop'] or '(空)'}")
-            if r["unmatched_attributes"]:
-                lines.append(f"    不匹配属性: {', '.join(r['unmatched_attributes'])}")
-            if r["matched_attributes"]:
-                lines.append(f"    匹配属性: {', '.join(r['matched_attributes'])}")
-            lines.append("")
-    else:
-        lines.append("[OK] 所有行高置信度匹配成功。")
+    # ✅ 高置信匹配
+    lines.append(f"✅ 高置信匹配：{high} 行")
 
-    lines.append("=" * 60)
+    # ⚠️ 需要确认
+    if low > 0:
+        lines.append(f"⚠️  需要确认：{low} 行")
+
+        # 聚合 failure_reason
+        reason_counter: Counter = Counter()
+        for r in match_results:
+            if r.get("confidence") == LOW_CONFIDENCE:
+                reason = r.get("failure_reason", "UNKNOWN")
+                reason_counter[reason] += 1
+
+        if reason_counter:
+            top_reason, top_count = reason_counter.most_common(1)[0]
+            display, suggestion = _format_top_reason(top_reason, top_count)
+            lines.append(f"   └─ 主要原因：{display}")
+            if suggestion:
+                lines.append(f"      建议：{suggestion}")
+
+    # ❌ 完全失败
+    if failed > 0:
+        lines.append(f"❌ 完全失败：{failed} 行")
+    else:
+        lines.append("❌ 完全失败：0 行")
+
+    lines.append("=" * 56)
+
+    # ── 详细日志部分 ──
+    if low > 0:
+        lines.append("")
+        lines.append("--- 详细日志 ---")
+        lines.append("")
+        for i, r in enumerate(match_results):
+            if r.get("confidence") == LOW_CONFIDENCE:
+                score = r.get("product_score", 0)
+                mtype = r.get("match_type", "?")
+                reason = r.get("failure_reason", "?")
+                unmatched = r.get("unmatched_attributes", [])
+                lines.append(
+                    f"  行 {i + 1}: "
+                    f"商品名分数={score:.1f}, "
+                    f"匹配类型={mtype}, "
+                    f"原因={reason}"
+                )
+                if unmatched:
+                    lines.append(f"    不匹配属性: {', '.join(unmatched)}")
+
     return "\n".join(lines)
 
 
@@ -699,14 +836,14 @@ if __name__ == "__main__":
     # ── 12. 报告生成 ──
     print("12. 报告生成")
     report = generate_report(batch_results)
-    check("低置信度: 2" in report, "报告显示 2 条低置信度")
-    check("低置信度行详情" in report, "报告包含详情段")
-    check("[OK] 所有行高置信度匹配成功" not in report, "非全 HIGH 不显示 [OK]")
+    check("需要确认：2 行" in report, "报告显示 2 条需要确认")
+    check("详细日志" in report, "报告包含详细日志段")
+    check("完全失败：0 行" in report, "报告显示完全失败 0 行")
     # 全 HIGH 报告
     high_only = [batch_results[0], batch_results[1], batch_results[2], batch_results[3], r11]
     report_high = generate_report(high_only)
-    check("低置信度: 0" in report_high, "全 HIGH 报告显示 0 低置信度")
-    check("[OK] 所有行高置信度匹配成功" in report_high, "全 HIGH 显示 [OK]")
+    check("需要确认" not in report_high, "全 HIGH 报告不含需要确认段")
+    check("高置信匹配：5 行" in report_high, "全 HIGH 报告显示 5 行高置信匹配")
     print()
 
     # ── 汇总 ──

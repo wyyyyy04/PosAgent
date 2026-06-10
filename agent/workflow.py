@@ -23,7 +23,7 @@ from agent.rule_engine import (
 from agent.schema_analyzer import analyze_from_dataframe
 from agent.token_classifier import classify_from_dataframe, reset_cache as tc_reset_cache
 from excel_io.excel_reader import read_master, read_template
-from excel_io.excel_writer import write_report, write_result
+from excel_io.excel_writer import write_result
 
 # ── 工作流状态键 ────────────────────────────────────────────────
 
@@ -230,34 +230,16 @@ def step_write_output(state: PipelineState) -> PipelineState:
             target_col=state.target_col,
         )
 
-        # 生成报告
+        # 生成用户友好摘要报告
         report_text = me_generate_report(state.match_results)
         state.report = report_text
 
-        # 写入报告文件
-        write_report(state.report_path, _build_low_confidence_list(state.match_results))
+        # 直接写入报告文件（报告内容已包含摘要 + 详细日志）
+        from pathlib import Path
+        Path(state.report_path).write_text(report_text, encoding="utf-8")
     except Exception as e:
         state.set_error("write_output", str(e))
     return state
-
-
-def _build_low_confidence_list(
-    match_results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """从匹配结果中提取低置信度行列表（供 write_report 使用）。"""
-    low = []
-    for i, r in enumerate(match_results):
-        if r.get("confidence") == "LOW_CONFIDENCE":
-            low.append({
-                "row_index": i + 2,  # Excel 行号（1=表头）
-                "product_name": f"行 {i+1}",
-                "reason": (
-                    f"商品名分数={r.get('product_score', 0):.1f}, "
-                    f"匹配类型={r.get('match_type', '?')}, "
-                    f"不匹配属性={r.get('unmatched_attributes', [])}"
-                ),
-            })
-    return low
 
 
 # ── LangGraph 工作流（可选）─────────────────────────────────────
@@ -543,7 +525,7 @@ if __name__ == "__main__":
 
         # 读取报告验证
         report_text = open(report_path, encoding="utf-8").read()
-        check("POS Template Mapping" in report_text, "报告包含标题")
+        check("本次映射完成" in report_text, "报告包含标题")
         print()
 
         # ── 4. 多候选精确匹配 ──
@@ -599,12 +581,12 @@ if __name__ == "__main__":
         # ── 6. 报告内容验证 ──
         print("6. 报告内容")
         check(
-            "总行数" in state.report,
-            "报告包含 '总行数'",
+            "高置信匹配" in state.report,
+            "报告包含高置信匹配统计",
         )
         check(
-            "高置信度" in state.report,
-            "报告包含置信度统计",
+            "需要确认" in state.report or "高置信匹配" in state.report,
+            "报告包含置信度分级",
         )
         print()
 
