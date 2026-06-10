@@ -7,8 +7,11 @@ Canonical Schema — 所有模板字段统一转换为此内部标准结构。
 from typing import Dict, List
 
 # ── Canonical 字段列表 ────────────────────────────────────────
-# 所有字段（含 tea_base 扩展字段）
-CANONICAL_FIELDS = ["product_name", "size", "milk_base", "temperature", "sugar", "tea_base"]
+# 所有字段（含 tea_base 扩展字段 + composite_col/sop 特殊字段）
+CANONICAL_FIELDS = [
+    "product_name", "size", "milk_base", "temperature", "sugar", "tea_base",
+    "composite_col", "sop",
+]
 
 # 必要维度：匹配时这些字段必须存在
 REQUIRED_DIMENSIONS = ["size", "temperature", "sugar"]
@@ -75,8 +78,10 @@ if __name__ == "__main__":
 
     # 1. 字段数量
     print("1. 字段定义")
-    check(len(CANONICAL_FIELDS) == 6, f"C_ANONICAL_FIELDS 包含 6 个字段（实际 {len(CANONICAL_FIELDS)}）")
+    check(len(CANONICAL_FIELDS) == 8, f"CANONICAL_FIELDS 包含 8 个字段（实际 {len(CANONICAL_FIELDS)}）")
     check("tea_base" in CANONICAL_FIELDS, "包含 tea_base 扩展字段")
+    check("composite_col" in CANONICAL_FIELDS, "包含 composite_col 特殊字段")
+    check("sop" in CANONICAL_FIELDS, "包含 sop 特殊字段")
     check(len(REQUIRED_DIMENSIONS) == 3, "3 个必要维度")
     check(len(WILDCARD_DIMENSIONS) == 2, "2 个通配维度")
     print()
@@ -102,7 +107,7 @@ if __name__ == "__main__":
     check(row["product_name"] == "测试", "自定义字段生效")
     check(row["size"] == "中杯", "自定义字段生效")
     check(row["milk_base"] is None, "未指定字段默认 None")
-    check(len(row) == 6, f"始终包含 6 个字段（实际 {len(row)}）")
+    check(len(row) == 8, f"始终包含 8 个字段（实际 {len(row)}）")
     print()
 
     # 5. get_missing_required

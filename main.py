@@ -310,37 +310,49 @@ def run(args: Optional[list] = None) -> int:
     llm_mode = "MOCK" if _cfg.USE_MOCK_LLM else "REAL"
     print(f"  LLM 模式: {llm_mode} (模型: {_cfg.DEEPSEEK_MODEL})")
 
-    # ── Schema 预分析 + 交互兜底 ──
-    from agent.schema_analyzer import (
-        _template_fingerprint,
-        analyze_from_dataframe,
-    )
-    from data.memory import (
-        get_template_rule as mem_get_template_rule,
-        save_template_rule as mem_save_template_rule,
-    )
-    from excel_io.excel_reader import read_template
+    # ── 模板类型检测（chowbus vs standard）──
+    from excel_io.excel_reader import read_template_raw, read_template
+    from agent.template_preprocessor import detect_template_type
 
-    # 预加载模板表（仅用于 Schema 分析，不影响管线内部的独立加载）
-    preload_df = read_template(opts.template, sheet_name=template_sheet)
-    fingerprint = _template_fingerprint(list(preload_df.columns))
+    raw_df = read_template_raw(opts.template, sheet_name=template_sheet)
+    _template_type = detect_template_type(raw_df)
 
-    # 先查指纹缓存（完整结果，可直接跳过 LLM + 交互）
-    cached_schema = mem_get_template_rule(fingerprint)
-    if cached_schema is not None:
-        print(f"[Schema] 模板指纹缓存命中 {fingerprint[:12]}...（跳过 Schema 分析）")
+    if _template_type == "chowbus":
+        print(f"[Template] 检测到 chowbus 模板类型，跳过 Schema 分析")
+        # chowbus 模板固定目标列
+        opts.target_col = "sop_code"
+
     else:
-        # 调用 Schema Analyzer（含 LLM + 列别名注入）
-        schema_result = analyze_from_dataframe(preload_df)
+        # ── Schema 预分析 + 交互兜底 ──（仅 standard 模板）
+        from agent.schema_analyzer import (
+            _template_fingerprint,
+            analyze_from_dataframe,
+        )
+        from data.memory import (
+            get_template_rule as mem_get_template_rule,
+            save_template_rule as mem_save_template_rule,
+        )
 
-        unrecognized = schema_result.get("unrecognized_cols", [])
-        if unrecognized:
-            print(f"[Schema] LLM 未能识别 {len(unrecognized)} 个列: {unrecognized}")
-            _interactive_classify_columns(unrecognized, preload_df, schema_result)
-            # 将完整结果写入指纹缓存（下次直接命中，跳过 LLM + 交互）
-            mem_save_template_rule(fingerprint, schema_result)
-            print(f"[Schema] 完整结果已写入模板指纹缓存 {fingerprint[:12]}...")
-        # 如果 unrecognized 为空，analyze() 内部已写入缓存
+        # 预加载模板表（仅用于 Schema 分析，不影响管线内部的独立加载）
+        preload_df = read_template(opts.template, sheet_name=template_sheet)
+        fingerprint = _template_fingerprint(list(preload_df.columns))
+
+        # 先查指纹缓存（完整结果，可直接跳过 LLM + 交互）
+        cached_schema = mem_get_template_rule(fingerprint)
+        if cached_schema is not None:
+            print(f"[Schema] 模板指纹缓存命中 {fingerprint[:12]}...（跳过 Schema 分析）")
+        else:
+            # 调用 Schema Analyzer（含 LLM + 列别名注入）
+            schema_result = analyze_from_dataframe(preload_df)
+
+            unrecognized = schema_result.get("unrecognized_cols", [])
+            if unrecognized:
+                print(f"[Schema] LLM 未能识别 {len(unrecognized)} 个列: {unrecognized}")
+                _interactive_classify_columns(unrecognized, preload_df, schema_result)
+                # 将完整结果写入指纹缓存（下次直接命中，跳过 LLM + 交互）
+                mem_save_template_rule(fingerprint, schema_result)
+                print(f"[Schema] 完整结果已写入模板指纹缓存 {fingerprint[:12]}...")
+            # 如果 unrecognized 为空，analyze() 内部已写入缓存
 
     # ── 主数据预加载 + 列推断（LLM + 交互兜底）──
     from excel_io.excel_reader import (

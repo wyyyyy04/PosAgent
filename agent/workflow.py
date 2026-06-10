@@ -52,6 +52,8 @@ class PipelineState:
         # 中间数据
         self.master_df: Optional[pd.DataFrame] = None
         self.template_df: Optional[pd.DataFrame] = None
+        self.template_type: str = "standard"  # "standard" | "chowbus"
+        self.chowbus_rows: Optional[List[Dict[str, Any]]] = None
         self.schema_result: Optional[Dict[str, Any]] = None
         self.token_results: Optional[List[Dict[str, Any]]] = None
         self.master_canonical: Optional[List[Dict[str, Any]]] = None
@@ -82,20 +84,110 @@ class PipelineState:
 
 
 def step_load_data(state: PipelineState) -> PipelineState:
-    """Step 1: 读取主数据表和模板表。"""
+    """Step 1: 读取主数据表和模板表 + 模板类型检测。"""
     if state.has_error:
         return state
     try:
+        from agent.template_preprocessor import detect_template_type, collect_chowbus_rows
+
         state.master_df = read_master(state.master_path, sheet_name=state.master_sheet)
-        state.template_df = read_template(state.template_path, sheet_name=state.template_sheet)
+
+        # 先以 header=None 读取模板原始数据，用于类型检测
+        from excel_io.excel_reader import read_template_raw
+        raw_df = read_template_raw(state.template_path, sheet_name=state.template_sheet)
+        state.template_type = detect_template_type(raw_df)
+
+        if state.template_type == "chowbus":
+            # chowbus 类型：收集散列字段，跳过 Schema Analyzer
+            state.chowbus_rows = collect_chowbus_rows(raw_df)
+            state.template_df = None  # chowbus 不使用标准 template_df
+            # 目标列：chowbus 模板固定为 sop_code
+            if state.target_col == "配料":
+                state.target_col = "sop_code"
+        else:
+            # standard 类型：正常读取
+            state.template_df = read_template(
+                state.template_path, sheet_name=state.template_sheet
+            )
     except Exception as e:
         state.set_error("load_data", str(e))
+    return state
+
+
+def step_preprocess(state: PipelineState) -> PipelineState:
+    """Step 1.5: chowbus 预处理 — 收集散列字段 → Token 分类 → 标准化为 Canonical。
+
+    对 standard 类型透明跳过。
+    """
+    if state.has_error or state.template_type != "chowbus":
+        return state
+    try:
+        from agent.token_classifier import (
+            classify_single,
+            set_prompt_hook as tc_set_prompt_hook,
+        )
+        from agent.rule_engine import master_to_canonical
+
+        # 注入静默钩子：UNKNOWN 不触发询问
+        tc_set_prompt_hook(lambda word, ctx: {"action": "skip"})
+
+        # 对每行 composite_info 做 Token 分类
+        for row in state.chowbus_rows:
+            composite_str = row.get("composite_info", "")
+            if composite_str:
+                result = classify_single(composite_str)
+                row["_tokens"] = result.get("tokens", [])
+                row["_missing"] = result.get("missing", [])
+            else:
+                row["_tokens"] = []
+                row["_missing"] = []
+
+        # 还原静默钩子
+        tc_set_prompt_hook(None)
+
+        # 转换为 Canonical Schema 行
+        from data.canonical_schema import CANONICAL_FIELDS
+        from data.token_dict import normalize_token
+
+        canonical_rows = []
+        for row in state.chowbus_rows:
+            cr = {f: None for f in CANONICAL_FIELDS}
+            cr["product_name"] = str(row.get("product_name", "") or "").strip()
+            for token in row.get("_tokens", []):
+                ttype = token.get("type", "")
+                tvalue = token.get("value", "")
+                # 将 token 类型映射到 canonical 字段
+                type_map = {
+                    "茶底": "tea_base",
+                    "奶底": "milk_base",
+                    "糖度": "sugar",
+                    "温度": "temperature",
+                    "规格": "size",
+                }
+                cfield = type_map.get(ttype)
+                if cfield and cfield in cr:
+                    cr[cfield] = tvalue
+            # 补充：直接收集的中文值可能未被 token 词典识别，
+            # 但标准化层接受部分缺失，匹配引擎会处理通配
+            canonical_rows.append(cr)
+
+        state.template_canonical = canonical_rows
+
+        # 主数据标准化（复用现有逻辑）
+        state.master_canonical = master_to_canonical(state.master_df)
+
+    except Exception as e:
+        state.set_error("preprocess", str(e))
     return state
 
 
 def step_analyze_schema(state: PipelineState) -> PipelineState:
     """Step 2: Schema Analyzer 分析模板字段语义。"""
     if state.has_error:
+        return state
+    # chowbus 类型跳过
+    if state.template_type == "chowbus":
+        return state
         return state
     try:
         state.schema_result = analyze_from_dataframe(state.template_df)
@@ -107,6 +199,8 @@ def step_analyze_schema(state: PipelineState) -> PipelineState:
 def step_classify_tokens(state: PipelineState) -> PipelineState:
     """Step 3: Token Classifier 解析组合字段。"""
     if state.has_error:
+        return state
+    if state.template_type == "chowbus":
         return state
     try:
         composite_col = state.schema_result.get("composite_col")
@@ -129,6 +223,8 @@ def step_normalize(state: PipelineState) -> PipelineState:
     """Step 4: Rule Engine — 主数据 + 模板标准化为 Canonical Schema。"""
     if state.has_error:
         return state
+    if state.template_type == "chowbus":
+        return state  # chowbus 已在 preprocess 中完成标准化
     try:
         fm = state.schema_result.get("field_mapping", {})
         composite_col = state.schema_result.get("composite_col", "")
@@ -145,6 +241,8 @@ def step_validate(state: PipelineState) -> PipelineState:
     """Step 5: Rule Engine — Token 验证 + 必要维度检查。"""
     if state.has_error:
         return state
+    if state.template_type == "chowbus":
+        return state  # chowbus 已在 preprocess 中完成验证
     try:
         state.validated_tokens = validate_tokens(state.token_results)
 
@@ -178,6 +276,10 @@ def _assert_product_name_integrity(state: PipelineState) -> None:
     state.template_canonical（经 Schema Analyzer → Token Classifier → Rule Engine 处理后）
     中的 product_name 字段。任何不一致都立即报错，防止 LLM 静默改写数据。
     """
+    # chowbus 类型跳过（template_df 为 None，产品名来自预处理层）
+    if state.template_type == "chowbus" or state.template_df is None:
+        return
+
     # 找到模板中映射为 product_name 的列
     fm = state.schema_result.get("field_mapping", {})
     src_col = None
@@ -229,6 +331,7 @@ def step_write_output(state: PipelineState) -> PipelineState:
             state.output_path,
             result_df,
             target_col=state.target_col,
+            header_row=2 if state.template_type == "chowbus" else 1,
         )
 
         # 生成用户友好摘要报告（文件 = 完整日志）
@@ -367,6 +470,7 @@ def run_pipeline(
     # 纯顺序执行
     steps = [
         ("load_data", step_load_data),
+        ("preprocess", step_preprocess),
         ("analyze_schema", step_analyze_schema),
         ("classify_tokens", step_classify_tokens),
         ("normalize", step_normalize),

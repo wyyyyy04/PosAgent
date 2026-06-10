@@ -165,6 +165,29 @@ def read_template(filepath: str, sheet_name=0) -> pd.DataFrame:
     return df
 
 
+def read_template_raw(filepath: str, sheet_name=0) -> "pd.DataFrame":
+    """以 header=None 读取模板表，保留原始行数据。
+
+    用于模板类型检测（chowbus vs standard）和散列字段收集。
+
+    Args:
+        filepath: 模板表 Excel 路径。
+        sheet_name: 工作表名或索引。
+
+    Returns:
+        pd.DataFrame，header=None，所有行列保留原始值。
+    """
+    import pandas as pd
+    from pathlib import Path
+
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"文件不存在: {filepath}")
+
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
+    return df
+
+
 # ── 自测 ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":

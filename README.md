@@ -123,6 +123,19 @@ Embedding 会将上述三者的相似度打高，导致误匹配。
 
 ---
 
+## 支持的模板类型
+
+### 标准模板（模板1）
+每行一个商品规格组合，含口味做法组合字段（逗号分隔）。
+字段名因模板而异（如 菜品名称 / 商品名称 / product_name），由 Schema Analyzer 自动识别。
+
+### chowbus 类型
+- **特征**：第一行英文字段名，第二行中文字段注释，108 列
+- **结构**：含 `item_cn`（商品名）+ `customization{N}_id` 选项组（N≥1, 最多 24 组）
+- **处理方式**：预处理层定位 `item_cn` 列，向右扫描收集中文值，拼成逗号分隔的 `composite_info`，复用标准 Token Classifier + Matching Engine 流程
+- **目标列**：`sop_code`
+- **效果**：0 API 调用，~0.3s 处理 108 行
+
 ## 系统架构
 
 ### 三层引擎设计
@@ -412,7 +425,8 @@ REPL 内支持以下斜杠指令：
 
 | 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
 |------|------|------|----------|------|------|
-| Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 12/12 + 16/16 passed | 读：主数据校验/多sheet/列名strip；写：保留样式/列宽/置信度列/报告 | `—` |
+| 模板预处理 | agent/template_preprocessor.py | ✅ 已完成 | 32/32 passed | chowbus 模板类型检测、散列字段收集、中文值提取；comma-join 兼容 Token Classifier | `—` |
+| Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 24/24 passed | 读：主数据校验/多sheet/列名strip/raw读取；写：保留样式/列宽/置信度列/报告/**双表头模板支持** | `—` |
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，28 个 Token；normalize_token() 四级优先级清洗；testdata 真数据补全茉莉绿茶 | `d2de102` |
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
@@ -425,6 +439,8 @@ REPL 内支持以下斜杠指令：
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
+
+### 标准模板（pos1 配方导出模板）
 
 | 指标 | 数值 |
 |------|------|
@@ -441,7 +457,20 @@ REPL 内支持以下斜杠指令：
 - 10 条：主数据中缺少规格「果蔬瓶」
 - 其余：糖度/温度个别不匹配
 
-> 结论：所有低置信度均为数据覆盖不全（主数据 vs 模板商品/属性覆盖差异），非匹配引擎 bug。
+### chowbus 模板
+
+| 指标 | 数值 |
+|------|------|
+| 总行数 | 108 |
+| 高置信匹配 | 90 行 (83.3%) |
+| 需要确认 | 18 行 (16.7%) |
+| 匹配失败 | 0 行 |
+| API 调用 | 0 次（无需 Schema Analyzer） |
+| 耗时 | ~0.3s |
+
+**18 条低置信度原因：** 主数据中缺少温度「冰沙」或规格「大杯」（数据覆盖不全）
+
+> 结论：所有低置信度均为数据覆盖不全，非匹配引擎 bug。
 
 ### 控制台摘要报告（`fec7ffe`）
 - **格式**：控制台输出按产品分组的简洁表格，详细日志仅写入文件
