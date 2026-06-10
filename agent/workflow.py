@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from agent.matching_engine import generate_report as me_generate_report
+from agent.matching_engine import generate_console_summary, generate_report as me_generate_report
 from agent.matching_engine import match
 from agent.rule_engine import (
     check_row_completeness,
@@ -59,6 +59,7 @@ class PipelineState:
         self.validated_tokens: Optional[List[Dict[str, Any]]] = None
         self.match_results: Optional[List[Dict[str, Any]]] = None
         self.report: str = ""
+        self.console_summary: str = ""
 
         # 错误信息
         self.error: Optional[str] = None
@@ -230,13 +231,15 @@ def step_write_output(state: PipelineState) -> PipelineState:
             target_col=state.target_col,
         )
 
-        # 生成用户友好摘要报告
-        report_text = me_generate_report(state.match_results)
-        state.report = report_text
+        # 生成用户友好摘要报告（文件 = 完整日志）
+        state.report = me_generate_report(state.match_results)
+        state.console_summary = generate_console_summary(
+            state.match_results, report_path=state.report_path
+        )
 
-        # 直接写入报告文件（报告内容已包含摘要 + 详细日志）
+        # 写入报告文件（完整日志）
         from pathlib import Path
-        Path(state.report_path).write_text(report_text, encoding="utf-8")
+        Path(state.report_path).write_text(state.report, encoding="utf-8")
     except Exception as e:
         state.set_error("write_output", str(e))
     return state

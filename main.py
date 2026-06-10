@@ -475,25 +475,24 @@ def run(args: Optional[list] = None) -> int:
         print(f"      耗时: {elapsed:.1f}s")
         return 1
 
-    # 输出摘要报告
+    # 输出控制台摘要
     api_calls = state.api_call_count if hasattr(state, 'api_call_count') else "?"
     print(f"\n[OK] 映射完成!  API 调用: {api_calls} 次  总耗时: {elapsed:.1f}s\n")
 
-    if state.report:
+    summary = getattr(state, 'console_summary', '') or state.report
+    if summary:
         # 使用 buffer 写入以支持 emoji（Windows GBK 控制台兼容）
         try:
-            sys.stdout.buffer.write((state.report + "\n").encode("utf-8"))
+            sys.stdout.buffer.write((summary + "\n").encode("utf-8"))
             sys.stdout.buffer.flush()
         except (UnicodeError, AttributeError):
-            print(state.report)
+            print(summary)
     else:
-        # 兜底摘要（旧版 workflow 可能不生成 report）
+        # 兜底摘要
         total = len(state.match_results)
         high = sum(1 for r in state.match_results if r.get("confidence") == "HIGH")
-        low = total - high
         print(f"     总行数:   {total}")
         print(f"     高置信度: {high} ({100*high/total:.1f}%)")
-        print(f"     低置信度: {low} ({100*low/total:.1f}%)")
 
     if state.report and state.report_path:
         # 报告已在 workflow 写入文件，确认路径

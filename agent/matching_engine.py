@@ -178,6 +178,8 @@ def match_single(
             "master_index": 0,
             "matched_attributes": [...],
             "unmatched_attributes": [...],
+            "failure_reason": "",
+            "template_product_name": "浅浅清茶",
         }
     """
     if threshold is None:
@@ -198,6 +200,7 @@ def match_single(
             "matched_attributes": [],
             "unmatched_attributes": REQUIRED_DIMENSIONS[:],
             "failure_reason": "PRODUCT_NOT_FOUND",
+            "template_product_name": "",
         }
 
     master_names = [str(m.get("product_name", "") or "").strip() for m in master_rows]
@@ -228,6 +231,7 @@ def match_single(
             "matched_attributes": matched,
             "unmatched_attributes": unmatched,
             "failure_reason": failure_reason or "",
+            "template_product_name": template_name,
         }
 
     # ── Step 1: 高置信度候选 + 属性过滤 ──
@@ -493,6 +497,126 @@ def generate_report(
                 )
                 if unmatched:
                     lines.append(f"    不匹配属性: {', '.join(unmatched)}")
+
+    return "\n".join(lines)
+
+
+def _format_single_reason(reason: str) -> str:
+    """将单个 failure_reason 转为简短中文描述。
+
+    MILK_BASE_NOT_FOUND:燕麦奶 → 主数据中没有奶底「燕麦奶」
+    SIZE_NOT_FOUND:果蔬瓶   → 主数据中没有规格「果蔬瓶」
+    PRODUCT_NOT_FOUND       → 商品名在主数据中未找到
+    """
+    code, extra = _parse_failure_reason(reason)
+    if code == "MILK_BASE_NOT_FOUND":
+        return f"主数据中没有奶底「{extra}」" if extra else "奶底在主数据中缺失"
+    if code == "SIZE_NOT_FOUND":
+        return f"主数据中没有规格「{extra}」" if extra else "规格在主数据中缺失"
+    if code == "TEMPERATURE_NOT_FOUND":
+        return f"主数据中没有温度「{extra}」" if extra else "温度/做法在主数据中缺失"
+    if code == "SUGAR_NOT_FOUND":
+        return f"主数据中没有糖度「{extra}」" if extra else "糖度在主数据中缺失"
+    if code == "TEA_BASE_NOT_FOUND":
+        return f"主数据中没有茶底「{extra}」" if extra else "茶底在主数据中缺失"
+    if code == "PRODUCT_NOT_FOUND":
+        return "商品名在主数据中未找到"
+    return reason
+
+
+def generate_console_summary(
+    match_results: List[Dict[str, Any]],
+    report_path: str = "",
+) -> str:
+    """生成面向控制台的摘要报告（无详细日志）。
+
+    按产品分组，同一产品的多个原因合并显示。末尾提示报告文件路径。
+
+    Args:
+        match_results: match() 返回的结果列表。
+        report_path: 详细报告文件路径（用于末尾提示）。
+
+    Returns:
+        格式化的控制台报告文本。
+    """
+    total = len(match_results)
+    high = sum(1 for r in match_results if r.get("confidence") == HIGH)
+    low = sum(1 for r in match_results if r.get("confidence") == LOW_CONFIDENCE)
+    failed = total - high - low
+    high_pct = (100 * high / total) if total > 0 else 0
+    low_pct = (100 * low / total) if total > 0 else 0
+
+    lines = []
+    lines.append("=" * 56)
+    lines.append(f"本次映射完成，共 {total} 行")
+    lines.append("")
+    lines.append(f"✅ 高置信匹配：{high} 行 ({high_pct:.1f}%)")
+    if low > 0:
+        lines.append(f"⚠️  需要确认：{low} 行 ({low_pct:.1f}%)")
+    if failed > 0:
+        lines.append(f"❌ 完全失败：{failed} 行")
+    else:
+        lines.append("❌ 完全失败：0 行")
+    lines.append("=" * 56)
+
+    if low == 0:
+        if report_path:
+            lines.append(f"\n详细报告已存储在: {report_path}")
+        return "\n".join(lines)
+
+    # ── 按产品分组聚合原因 ──
+    from collections import defaultdict
+    product_reasons: Dict[str, List[str]] = defaultdict(list)
+    product_counts: Dict[str, int] = defaultdict(int)
+
+    for r in match_results:
+        if r.get("confidence") != LOW_CONFIDENCE:
+            continue
+        product = str(r.get("template_product_name", "") or "").strip()
+        if not product:
+            product = "(空商品名)"
+        reason = r.get("failure_reason", "UNKNOWN")
+        product_counts[product] += 1
+        if reason not in product_reasons[product]:
+            product_reasons[product].append(reason)
+
+    # ── 生成表格 ──
+    # 表头
+    lines.append("")
+    lines.append("低置信度明细：")
+    header = f"  {'产品':<20} {'原因':<50} {'行数':<6}"
+    lines.append(header)
+    lines.append(f"  {'-'*18}  {'-'*48}  {'-'*4}")
+
+    # 按行数降序排列
+    sorted_products = sorted(product_counts.items(), key=lambda x: x[1], reverse=True)
+    for product, count in sorted_products:
+        reasons = product_reasons[product]
+        reason_texts = [_format_single_reason(r) for r in reasons]
+        combined = "、".join(reason_texts)
+
+        # 产品名截断
+        display_name = product if len(product) <= 20 else product[:17] + "..."
+
+        # 原因文本折行处理
+        max_reason_len = 48
+        if len(combined) <= max_reason_len:
+            lines.append(f"  {display_name:<20} {combined:<50} {count}")
+        else:
+            # 第一行
+            first_line = combined[:max_reason_len]
+            lines.append(f"  {display_name:<20} {first_line:<50} {count}")
+            # 续行
+            remaining = combined[max_reason_len:]
+            while remaining:
+                chunk = remaining[:max_reason_len]
+                lines.append(f"  {'':<20} {chunk:<48}")
+                remaining = remaining[max_reason_len:]
+
+    # ── 末尾：报告路径提示 ──
+    if report_path:
+        lines.append("")
+        lines.append(f"详细报告已存储在: {report_path}")
 
     return "\n".join(lines)
 
