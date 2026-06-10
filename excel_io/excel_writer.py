@@ -23,6 +23,7 @@ def write_result(
     target_col: str = "配料",
     confidence_col: str = CONFIDENCE_COLUMN,
     header_row: int = 1,
+    data_start_row: Optional[int] = None,
 ) -> str:
     """将匹配结果写入 Excel，保留模板原始格式。
 
@@ -35,15 +36,20 @@ def write_result(
         result_df: 包含填充结果的 DataFrame，须至少包含 target_col 和 confidence_col。
         target_col: 需要填充的目标列名，默认 "配料"。
         confidence_col: 置信度列名，默认 "匹配置信度"。
-        header_row: 表头所在行号（1=第一行），chowbus 模板为 1（两行表头，数据从第3行开始）。
+        header_row: 用于搜索目标列/置信度列的表头行号（1=第一行）。
+        data_start_row: 数据写入起始行号，默认 = header_row + 1。
+            chowbus 模板应传 header_row=1, data_start_row=3（跳过两行表头）。
 
     Returns:
         output_path
     """
+    if data_start_row is None:
+        data_start_row = header_row + 1
+
     wb = openpyxl.load_workbook(template_path)
     ws = wb.active
 
-    # 定位目标列和置信度列的列号
+    # 定位目标列和置信度列的列号（始终在 header_row 搜索）
     target_col_idx = None
     confidence_col_idx = None
     max_col = ws.max_column
@@ -58,22 +64,14 @@ def write_result(
     if target_col_idx is None:
         # 目标列不存在，追加到末尾
         target_col_idx = max_col + 1
-        if header_row == 1:
-            ws.cell(row=1, column=target_col_idx, value=target_col)
-        else:
-            # 多行表头：仅在第一行写入列名
-            ws.cell(row=1, column=target_col_idx, value=target_col)
+        ws.cell(row=1, column=target_col_idx, value=target_col)
 
     if confidence_col_idx is None:
         # 置信度列不存在，追加到目标列后面
         confidence_col_idx = target_col_idx + 1
-        if header_row == 1:
-            ws.cell(row=1, column=confidence_col_idx, value=confidence_col)
-        else:
-            ws.cell(row=1, column=confidence_col_idx, value=confidence_col)
+        ws.cell(row=1, column=confidence_col_idx, value=confidence_col)
 
-    # 写入数据（从表头下一行开始，chowbus 双表头从第3行开始）
-    data_start_row = header_row + 1
+    # 写入数据
     for i, (_, row) in enumerate(result_df.iterrows()):
         excel_row = data_start_row + i
         if target_col in result_df.columns:
