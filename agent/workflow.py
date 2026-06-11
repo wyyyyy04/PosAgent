@@ -67,6 +67,10 @@ class PipelineState(TypedDict, total=False):
     report: str
     console_summary: str
 
+    # ── Human Review（用户审核介入）──
+    low_conf_rows: List[Dict[str, Any]]
+    human_review_result: Dict[str, Any]
+
     # ── 错误信息 ──
     error: str
     error_step: str
@@ -316,6 +320,11 @@ def step_match(state: PipelineState) -> PipelineState:
         # ── 断言：验证商品名称在管线各阶段未被改写 ──
         _assert_product_name_integrity(state)
         state["match_results"] = match(state["template_canonical"], state["master_canonical"])
+        # 提取低置信度行，供 human_review 审核
+        state["low_conf_rows"] = [
+            r for r in state["match_results"]
+            if r.get("confidence") == "LOW_CONFIDENCE"
+        ]
     except Exception as e:
         state["error"] = str(e)
         state["error_step"] = "match"
@@ -403,10 +412,56 @@ def step_write_output(state: PipelineState) -> PipelineState:
     return state
 
 
-# ── LangGraph 工作流（可选）─────────────────────────────────────
+# ── 路由函数 ────────────────────────────────────────────────────
+
+
+def route_after_load(state: PipelineState) -> str:
+    """load_data 之后的条件路由。
+
+    - 有错误 → 直接跳到 write_output
+    - chowbus 模板 → preprocess
+    - standard 模板 → analyze_schema
+    """
+    if state.get("error") is not None:
+        return "write_output"
+    if state.get("template_type") == "chowbus":
+        return "preprocess"
+    return "analyze_schema"
+
+
+def route_after_match(state: PipelineState) -> str:
+    """match 之后的条件路由。
+
+    - 有错误 → 直接跳到 write_output
+    - 有 LOW_CONFIDENCE 行 → human_review
+    - 全部 HIGH → write_output
+    """
+    if state.get("error") is not None:
+        return "write_output"
+    low_conf = state.get("low_conf_rows", [])
+    if low_conf:
+        return "human_review"
+    return "write_output"
+
+
+# ── Human Review 占位节点 ────────────────────────────────────────
+
+
+def step_human_review_placeholder(state: PipelineState) -> PipelineState:
+    """Human Review 占位节点。
+
+    interrupt_before 会在进入此节点前挂起图执行。
+    外部通过 graph.update_state() 注入 human_review_result 后恢复执行。
+    此节点本身不需要逻辑，返回 state 即可。
+    """
+    return state
+
+
+# ── LangGraph 工作流 ─────────────────────────────────────────────
+
 
 def build_graph():
-    """构建 LangGraph StateGraph。
+    """构建 LangGraph StateGraph（条件路由 + checkpoint + interrupt）。
 
     需要 langgraph 已安装。返回编译后的 app 对象。
 
@@ -417,6 +472,7 @@ def build_graph():
 
     graph = StateGraph(PipelineState)
 
+    # 注册所有节点
     graph.add_node("load_data", step_load_data)
     graph.add_node("preprocess", step_preprocess)
     graph.add_node("analyze_schema", step_analyze_schema)
@@ -424,18 +480,46 @@ def build_graph():
     graph.add_node("normalize", step_normalize)
     graph.add_node("validate", step_validate)
     graph.add_node("match", step_match)
+    graph.add_node("human_review", step_human_review_placeholder)
     graph.add_node("write_output", step_write_output)
 
     graph.set_entry_point("load_data")
-    graph.add_edge("load_data", "preprocess")
-    graph.add_edge("preprocess", "analyze_schema")
+
+    # ── 条件边：load_data 之后根据模板类型 + 错误状态分流 ──
+    graph.add_conditional_edges(
+        "load_data",
+        route_after_load,
+        {
+            "preprocess": "preprocess",
+            "analyze_schema": "analyze_schema",
+            "write_output": "write_output",
+        },
+    )
+
+    # ── chowbus：preprocess → 直接 match ──
+    graph.add_edge("preprocess", "match")
+
+    # ── standard：标准管线链 ──
     graph.add_edge("analyze_schema", "classify_tokens")
     graph.add_edge("classify_tokens", "normalize")
     graph.add_edge("normalize", "validate")
     graph.add_edge("validate", "match")
-    graph.add_edge("match", "write_output")
+
+    # ── 条件边：match 之后根据低置信度行数分流 ──
+    graph.add_conditional_edges(
+        "match",
+        route_after_match,
+        {
+            "human_review": "human_review",
+            "write_output": "write_output",
+        },
+    )
+
+    # ── human_review 后直接输出 ──
+    graph.add_edge("human_review", "write_output")
     graph.add_edge("write_output", END)
 
+    # TODO: 加入 checkpointer + interrupt_before 前需解决 DataFrame 序列化问题
     return graph.compile()
 
 
@@ -769,6 +853,27 @@ if __name__ == "__main__":
             check(seq_confs == lg_confs, "置信度结果一致")
             check(len(state_seq["match_results"]) == len(state_lg["match_results"]),
                   f"匹配行数一致（{len(state_seq['match_results'])}）")
+        print()
+
+        # ── 9. 路由函数单元测试 ──
+        print("9. 路由函数单元测试")
+        check(route_after_load({"error": "test error"}) == "write_output",
+              "有 error → write_output")
+        check(route_after_load({"template_type": "chowbus"}) == "preprocess",
+              "chowbus → preprocess")
+        check(route_after_load({"template_type": "standard"}) == "analyze_schema",
+              "standard → analyze_schema")
+        check(route_after_load({}) == "analyze_schema",
+              "无 template_type 默认 → analyze_schema")
+
+        check(route_after_match({"error": "test"}) == "write_output",
+              "match 有 error → write_output")
+        check(route_after_match({"low_conf_rows": [{"confidence": "LOW_CONFIDENCE"}]}) == "human_review",
+              "有低置信度行 → human_review")
+        check(route_after_match({"low_conf_rows": []}) == "write_output",
+              "无低置信度行 → write_output")
+        check(route_after_match({}) == "write_output",
+              "low_conf_rows 不存在 → write_output")
         print()
 
     finally:
