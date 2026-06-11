@@ -431,7 +431,7 @@ REPL 内支持以下斜杠指令：
 | Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 24/24 passed | 8 字段定义（+composite_col +sop）、主数据映射、Token 类型映射、通配维度 | `73fe576` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
-| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
+| Token Classifier | agent/token_classifier.py | ✅ 已完成 | 60/60 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词四级兜底**（词典→记忆→LLM猜测→交互）；LLM 先猜再确认(y/n)，批量模式自动写入；_llm_guess_cache 进程缓存 | `c83ec74` |
 | 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三级存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7+1 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式、**chowbus 预处理层** + console_summary 控制台输出 | `192934f` |
