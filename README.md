@@ -186,34 +186,49 @@ Embedding 会将上述三者的相似度打高，导致误匹配。
 ## 工作流详解
 
 ```
-CLI 命令输入
-↓
-读取 Excel（主数据表 + 模板表）
-↓
-[LLM] Schema Analyzer
-  · 分析模板字段语义
-  · 识别组合字段、冗余字段
-  · 输出字段映射配置（一次性，缓存复用）
-↓
-[LLM] Token Classifier（逐行）
-  · 解析口味做法组合
-  · 识别缺失维度
-  · 输出结构化 Token JSON
-↓
-[Rule Engine] 标准化
-  · 验证 Token 合法性
-  · 应用奶底通配逻辑
-  · 转换为 Canonical Schema
-↓
-[Matching Engine] 匹配
-  · Step 1：RapidFuzz 商品名精确匹配
-  · Step 2：属性组合规则匹配（温度/糖度/规格/奶底/茶底）
-  · Step 3：Embedding 候选召回（仅当前两步置信度不足）
-  · 无结果：填最佳猜测，标注 LOW_CONFIDENCE
-↓
-写入 Excel（保留原格式，填充配料列）
-↓
-输出校验报告（低置信度行汇总）
+                      ┌─────────────┐
+                      │  load_data  │ 读取 Excel + 模板类型检测
+                      └──┬──┬──┬───┘
+                error ──┤  │  └── standard
+                        │  │        │
+                   ┌────┘  │ chowbus│
+                   ▼       ▼        ▼
+              ┌────────┐  ┌──────────────┐
+              │preprocess│ │analyze_schema│ LLM 分析
+              └───┬─────┘ └──────┬───────┘
+                  │              ▼
+                  │       ┌──────────────┐
+                  │       │classify_tokens│ 规则分类
+                  │       └──────┬───────┘
+                  │              ▼
+                  │       ┌──────────┐
+                  │       │normalize │ Canonical 标准化
+                  │       └────┬─────┘
+                  │            ▼
+                  │       ┌────────┐
+                  │       │validate│ 完整性检查
+                  │       └───┬────┘
+                  ▼            ▼
+              ┌────────┐  ┌───────┐
+              │  match  │◄─┤ match │ 匹配引擎
+              └───┬─────┘  └─┬───┬─┘
+                  │     error│   │全部 HIGH
+                  │          │   │
+                  └──────────┼───┘
+                             │ LOW_CONFIDENCE
+                             ▼
+                      ┌────────────┐
+                      │human_review│ 交互审核 (interrupt)
+                      └─────┬──────┘
+                             │
+                             ▼
+                      ┌────────────┐
+                      │write_output│ 写入 Excel + 报告
+                      └────────────┘
+
+  条件路由:
+  - load_data → error? write_output : chowbus? preprocess : analyze_schema
+  - match     → error? write_output : low_conf? human_review : write_output
 ```
 
 ---
@@ -434,7 +449,8 @@ REPL 内支持以下斜杠指令：
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 60/60 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词四级兜底**（词典→记忆→LLM猜测→交互）；LLM 先猜再确认(y/n)，批量模式自动写入；_llm_guess_cache 进程缓存 | `c83ec74` |
 | 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三级存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
-| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7+1 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式、**chowbus 预处理层** + console_summary 控制台输出 | `192934f` |
+| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 45/45 passed | **条件路由** (add_conditional_edges)、**Human Review 节点** (interrupt_before + resume)、**DataFrame 序列化适配器**、PipelineState(TypedDict)、8 步管线编排、LangGraph/纯顺序双模式 | `dc067cb` |
+| Human Review | cli/human_review.py | ✅ 已完成 | 10/10 passed | 低置信度行交互式审核（接受/手动/跳过/永久跳过）、run_review_silent 批量模式 | `dc067cb` |
 | CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**批量模式自动跳过交互**、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译 | `73fe576` |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
