@@ -188,7 +188,6 @@ def step_analyze_schema(state: PipelineState) -> PipelineState:
     # chowbus 类型跳过
     if state.template_type == "chowbus":
         return state
-        return state
     try:
         state.schema_result = analyze_from_dataframe(state.template_df)
     except Exception as e:
