@@ -731,12 +731,6 @@ if __name__ == "__main__":
         "配料": ["", ""],
     }).to_excel(template_path, index=False)
 
-    import config as cfg
-    original_mock = list(cfg.MOCK_TOKEN_RESPONSE)
-    cfg.MOCK_TOKEN_RESPONSE = [
-        {"tokens": [{"value": "牛奶", "type": "奶底"}, {"value": "少冰", "type": "温度"}, {"value": "七分糖", "type": "糖度"}], "missing": ["茶底"]},
-        {"tokens": [{"value": "椰乳", "type": "奶底"}, {"value": "热", "type": "温度"}, {"value": "无糖", "type": "糖度"}], "missing": ["茶底"]},
-    ]
     from agent.token_classifier import reset_cache
     reset_cache()
 
@@ -751,7 +745,6 @@ if __name__ == "__main__":
         if os.path.exists(f):
             os.remove(f)
     os.rmdir(tmpdir)
-    cfg.MOCK_TOKEN_RESPONSE = original_mock
     reset_cache()
 
     # ── 18. /run 参数不足 ──

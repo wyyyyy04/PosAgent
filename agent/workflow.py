@@ -525,35 +525,7 @@ if __name__ == "__main__":
     # ── 覆盖 Mock 响应以匹配测试数据 ──
     import config as cfg
 
-    original_mock_token = list(cfg.MOCK_TOKEN_RESPONSE)
     original_mock_schema = dict(cfg.MOCK_SCHEMA_RESPONSE)
-
-    # 为 Test 1-3 设置 Token 分类 Mock（与模板行一一对应）
-    cfg.MOCK_TOKEN_RESPONSE = [
-        {  # Row 1: 牛奶, 少冰, 七分糖
-            "tokens": [
-                {"value": "牛奶", "type": "奶底"},
-                {"value": "少冰", "type": "温度"},
-                {"value": "七分糖", "type": "糖度"},
-            ],
-            "missing": ["茶底"],
-        },
-        {  # Row 2: 牛奶, 去冰, 标准糖
-            "tokens": [
-                {"value": "牛奶", "type": "奶底"},
-                {"value": "去冰", "type": "温度"},
-                {"value": "标准糖", "type": "糖度"},
-            ],
-            "missing": ["茶底"],
-        },
-        {  # Row 3: 正常冰, 标准糖
-            "tokens": [
-                {"value": "正常冰", "type": "温度"},
-                {"value": "标准糖", "type": "糖度"},
-            ],
-            "missing": ["茶底", "奶底"],
-        },
-    ]
     tc_reset_cache()
 
     # ── 准备测试用主数据表和模板表 ──
@@ -637,16 +609,6 @@ if __name__ == "__main__":
 
         # ── 4. 多候选精确匹配 ──
         print("4. 多候选精确属性选择")
-        cfg.MOCK_TOKEN_RESPONSE = [
-            {  # 燕麦奶, 少冰, 七分糖
-                "tokens": [
-                    {"value": "燕麦奶", "type": "奶底"},
-                    {"value": "少冰", "type": "温度"},
-                    {"value": "七分糖", "type": "糖度"},
-                ],
-                "missing": ["茶底"],
-            },
-        ]
         tc_reset_cache()
 
         # 同产品名三个主数据行（不同属性），应精确选择对的属性
@@ -699,15 +661,6 @@ if __name__ == "__main__":
 
         # ── 7. 无匹配商品 → LOW_CONFIDENCE ──
         print("7. 无匹配商品 → LOW_CONFIDENCE")
-        cfg.MOCK_TOKEN_RESPONSE = [
-            {  # 正常冰, 标准糖
-                "tokens": [
-                    {"value": "正常冰", "type": "温度"},
-                    {"value": "标准糖", "type": "糖度"},
-                ],
-                "missing": ["茶底", "奶底"],
-            },
-        ]
         tc_reset_cache()
         pd.DataFrame({
             "品名": ["产品A"],
@@ -747,7 +700,6 @@ if __name__ == "__main__":
         os.rmdir(tmpdir)
 
     # 还原 Mock 设置
-    cfg.MOCK_TOKEN_RESPONSE = original_mock_token
     cfg.MOCK_SCHEMA_RESPONSE = original_mock_schema
     tc_reset_cache()
 
