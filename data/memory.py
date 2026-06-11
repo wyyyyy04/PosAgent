@@ -227,6 +227,61 @@ def get_template_rules() -> Dict[str, Any]:
     return dict(data.get("template_rules", {}))
 
 
+# ── Human Review 确认映射 ────────────────────────────────────────
+
+
+def build_confirmed_key(master_fingerprint: str, canonical_row: dict) -> str:
+    """为 human_review 确认结果构建唯一键。
+
+    键格式：fingerprint|product_name|size|milk_base|temperature|sugar|tea_base
+
+    Args:
+        master_fingerprint: 主数据文件 MD5 前 8 位。
+        canonical_row: 模板 canonical 行。
+
+    Returns:
+        唯一键字符串。
+    """
+    parts = [master_fingerprint]
+    for field in ["product_name", "size", "milk_base", "temperature", "sugar", "tea_base"]:
+        val = canonical_row.get(field) or ""
+        parts.append(str(val).strip())
+    return "|".join(parts)
+
+
+def add_confirmed_mapping(key: str, sop: str) -> None:
+    """持久化 human_review 确认的映射关系。
+
+    Args:
+        key: build_confirmed_key 生成的唯一键。
+        sop: 确认的 SOP 代码，或 "__SKIP__" 表示永久跳过。
+    """
+    global _dirty
+    data = _load()
+    data.setdefault("match_corrections", {})[key] = {
+        "sop": sop,
+        "confirmed_at": date.today().isoformat(),
+    }
+    _dirty = True
+    _save()
+
+
+def get_confirmed_mapping(key: str) -> Optional[str]:
+    """查询已确认的映射关系。
+
+    Args:
+        key: build_confirmed_key 生成的唯一键。
+
+    Returns:
+        确认的 SOP 代码，或 None。
+    """
+    data = _load()
+    entry = data.get("match_corrections", {}).get(key)
+    if entry and isinstance(entry, dict):
+        return entry.get("sop")
+    return None
+
+
 def add_template_rule(key: str, value: Any) -> None:
     """添加模板规则并持久化。"""
     global _dirty

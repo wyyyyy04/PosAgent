@@ -444,17 +444,105 @@ def route_after_match(state: PipelineState) -> str:
     return "write_output"
 
 
-# ── Human Review 占位节点 ────────────────────────────────────────
+# ── Human Review 节点 ────────────────────────────────────────────
 
 
-def step_human_review_placeholder(state: PipelineState) -> PipelineState:
-    """Human Review 占位节点。
+def _compute_master_fingerprint(path: str) -> str:
+    """计算主数据文件的内容指纹（MD5 前 8 位）。"""
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()[:8]
 
-    interrupt_before 会在进入此节点前挂起图执行。
-    外部通过 graph.update_state() 注入 human_review_result 后恢复执行。
-    此节点本身不需要逻辑，返回 state 即可。
+
+def step_human_review(state: PipelineState) -> PipelineState:
+    """Human Review 节点：应用用户审核决策。
+
+    前提：interrupt_before 挂起后，外部通过 update_state 注入
+    human_review_result。本节点读取该字段并应用到 match_results。
+
+    逻辑：
+      - accept/manual → 升级对应行为 HIGH，写入长期记忆
+      - permanent_skip → 写入 __SKIP__ 到长期记忆，保持 LOW_CONFIDENCE
+      - skip → 不写记忆，保持 LOW_CONFIDENCE
     """
+    review_result = state.get("human_review_result", {})
+    if not review_result:
+        return state
+
+    decisions = review_result.get("decisions", [])
+    if not decisions:
+        return state
+
+    match_results = state.get("match_results", [])
+    template_canonical = state.get("template_canonical", [])
+    master_fingerprint = _compute_master_fingerprint(
+        str(state.get("master_path", ""))
+    )
+
+    from data.memory import add_confirmed_mapping, build_confirmed_key
+    from data.memory import get_confirmed_mapping
+
+    for decision in decisions:
+        idx = decision["row_index"]
+        action = decision["action"]
+
+        if idx < 0 or idx >= len(match_results):
+            continue
+
+        if action in ("accept", "manual"):
+            sop = decision.get("sop", "")
+            match_results[idx]["sop"] = sop
+            match_results[idx]["confidence"] = "HIGH"
+            # 写入长期记忆
+            if idx < len(template_canonical):
+                key = build_confirmed_key(master_fingerprint, template_canonical[idx])
+                add_confirmed_mapping(key, sop)
+
+        elif action == "permanent_skip":
+            if idx < len(template_canonical):
+                key = build_confirmed_key(master_fingerprint, template_canonical[idx])
+                add_confirmed_mapping(key, "__SKIP__")
+
+        # action == "skip"：不写记忆，保持 LOW_CONFIDENCE
+
+    state["match_results"] = match_results
+    # 清除 human_review_result，防止重复应用
+    state["human_review_result"] = {}
     return state
+
+
+# ── DataFrame 序列化适配器 ────────────────────────────────────────
+
+
+class _DataFrameSerde:
+    """包装默认 serde，处理 DataFrame 的 msgpack 序列化。
+
+    将 DataFrame 转为 records 格式序列化，反序列化时还原。
+    保证 checkpointer 可以在 interrupt 后正确恢复状态。
+    """
+
+    def __init__(self):
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+        self._inner = JsonPlusSerializer()
+
+    def dumps_typed(self, obj):
+        import pandas as pd
+        if isinstance(obj, pd.DataFrame):
+            wrapped = {"__dataframe__": obj.to_dict(orient="records")}
+            # 也保存列名（空 DataFrame 的 records 为空列表）
+            wrapped["__columns__"] = list(obj.columns)
+            return self._inner.dumps_typed(wrapped)
+        return self._inner.dumps_typed(obj)
+
+    def loads_typed(self, data):
+        import pandas as pd
+        result = self._inner.loads_typed(data)
+        if isinstance(result, dict) and "__dataframe__" in result:
+            return pd.DataFrame(
+                result["__dataframe__"],
+                columns=result.get("__columns__"),
+            )
+        return result
 
 
 # ── LangGraph 工作流 ─────────────────────────────────────────────
@@ -468,6 +556,7 @@ def build_graph():
     Raises:
         ImportError: langgraph 未安装。
     """
+    from langgraph.checkpoint.memory import MemorySaver
     from langgraph.graph import END, StateGraph
 
     graph = StateGraph(PipelineState)
@@ -480,7 +569,7 @@ def build_graph():
     graph.add_node("normalize", step_normalize)
     graph.add_node("validate", step_validate)
     graph.add_node("match", step_match)
-    graph.add_node("human_review", step_human_review_placeholder)
+    graph.add_node("human_review", step_human_review)
     graph.add_node("write_output", step_write_output)
 
     graph.set_entry_point("load_data")
@@ -519,8 +608,12 @@ def build_graph():
     graph.add_edge("human_review", "write_output")
     graph.add_edge("write_output", END)
 
-    # TODO: 加入 checkpointer + interrupt_before 前需解决 DataFrame 序列化问题
-    return graph.compile()
+    # ── 编译 + checkpoint + interrupt ──
+    checkpointer = MemorySaver(serde=_DataFrameSerde())
+    return graph.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["human_review"],
+    )
 
 
 # ── 公开 API ────────────────────────────────────────────────────
@@ -577,8 +670,29 @@ def run_pipeline(
     _reset_new_tokens()
 
     if use_langgraph:
+        import uuid
         app = build_graph()
-        result = app.invoke(state)
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        result = app.invoke(state, config)
+
+        # 检查是否在 human_review 前挂起
+        snapshot = app.get_state(config)
+        if snapshot.next and "human_review" in snapshot.next:
+            # 拉取当前状态中的低置信度行
+            snap_state = snapshot.values
+            low_conf = snap_state.get("low_conf_rows", [])
+            master_fp = _compute_master_fingerprint(
+                str(snap_state.get("master_path", ""))
+            )
+
+            # 调用审核交互
+            from cli.human_review import run_review
+            review_result = run_review(low_conf, master_fp)
+
+            # 注入审核结果并恢复执行
+            app.update_state(config, {"human_review_result": review_result})
+            result = app.invoke(None, config)
+
         # 收集 API 调用统计
         from agent.schema_analyzer import get_api_call_count as _sa_count
         from agent.token_classifier import get_api_call_count as _tc_count
@@ -874,6 +988,57 @@ if __name__ == "__main__":
               "无低置信度行 → write_output")
         check(route_after_match({}) == "write_output",
               "low_conf_rows 不存在 → write_output")
+        print()
+
+        # ── 10. step_human_review 单元测试 ──
+        print("10. step_human_review 单元测试")
+        # 10a: 空 review_result → 无操作
+        s10a = {"human_review_result": {}, "match_results": [{"sop": "OLD", "confidence": "LOW_CONFIDENCE"}]}
+        step_human_review(s10a)
+        check(s10a["match_results"][0]["sop"] == "OLD", "空 review → 不变")
+
+        # 10b: accept 升级为 HIGH
+        s10b = {
+            "human_review_result": {"decisions": [{"row_index": 0, "action": "accept", "sop": "NEW"}]},
+            "match_results": [{"sop": "OLD", "confidence": "LOW_CONFIDENCE"}],
+            "template_canonical": [{"product_name": "测试"}],
+            "master_path": master_path,
+        }
+        step_human_review(s10b)
+        check(s10b["match_results"][0]["confidence"] == "HIGH", "accept → HIGH")
+        check(s10b["match_results"][0]["sop"] == "NEW", "accept → sop=NEW")
+
+        # 10c: manual 手动输入
+        s10c = {
+            "human_review_result": {"decisions": [{"row_index": 0, "action": "manual", "sop": "手动SOP"}]},
+            "match_results": [{"sop": "OLD", "confidence": "LOW_CONFIDENCE"}],
+            "template_canonical": [{"product_name": "测试"}],
+            "master_path": master_path,
+        }
+        step_human_review(s10c)
+        check(s10c["match_results"][0]["confidence"] == "HIGH", "manual → HIGH")
+        check(s10c["match_results"][0]["sop"] == "手动SOP", "manual → sop=手动SOP")
+
+        # 10d: skip 保持 LOW_CONFIDENCE
+        s10d = {
+            "human_review_result": {"decisions": [{"row_index": 0, "action": "skip"}]},
+            "match_results": [{"sop": "OLD", "confidence": "LOW_CONFIDENCE"}],
+            "template_canonical": [],
+            "master_path": "",
+        }
+        step_human_review(s10d)
+        check(s10d["match_results"][0]["confidence"] == "LOW_CONFIDENCE", "skip → 保持 LOW_CONFIDENCE")
+
+        # 10e: permanent_skip 写入 __SKIP__
+        s10e = {
+            "human_review_result": {"decisions": [{"row_index": 0, "action": "permanent_skip"}]},
+            "match_results": [{"sop": "OLD", "confidence": "LOW_CONFIDENCE"}],
+            "template_canonical": [{"product_name": "永久跳过商品"}],
+            "master_path": master_path,
+        }
+        step_human_review(s10e)
+        check(s10e["match_results"][0]["confidence"] == "LOW_CONFIDENCE",
+              "permanent_skip → 保持 LOW_CONFIDENCE（标记在 memory 中）")
         print()
 
     finally:
