@@ -38,7 +38,7 @@ except ImportError:
     from typing_extensions import TypedDict
 
 
-class PipelineStateDict(TypedDict, total=False):
+class PipelineState(TypedDict, total=False):
     """TypedDict 版本的管线状态（所有字段可选，支持增量更新）。
 
     total=False: 节点只需返回变化的字段，其余字段由 LangGraph 自动合并。
@@ -83,8 +83,8 @@ def make_pipeline_state(
     target_col: str = "配料",
     master_sheet: int = 0,
     template_sheet: int = 0,
-) -> PipelineStateDict:
-    """创建 PipelineStateDict 并填充默认值。
+) -> PipelineState:
+    """创建 PipelineState 并填充默认值。
 
     Args:
         master_path: 主数据表 Excel 路径。
@@ -96,9 +96,9 @@ def make_pipeline_state(
         template_sheet: 模板表 Sheet 序号。
 
     Returns:
-        初始化好的 PipelineStateDict。
+        初始化好的 PipelineState。
     """
-    return PipelineStateDict(
+    return PipelineState(
         master_path=master_path,
         template_path=template_path,
         output_path=output_path,
@@ -127,63 +127,10 @@ def make_pipeline_state(
     )
 
 
-# DEPRECATED: 迁移到 PipelineStateDict 后删除
-class PipelineState:
-    """管线状态容器。每个节点读/写此对象上的属性。"""
-
-    def __init__(
-        self,
-        master_path: str,
-        template_path: str,
-        output_path: str,
-        report_path: Optional[str] = None,
-        target_col: str = "配料",
-        master_sheet: int = 0,
-        template_sheet: int = 0,
-    ):
-        self.master_path = master_path
-        self.template_path = template_path
-        self.output_path = output_path
-        self.report_path = report_path or output_path.replace(".xlsx", "_report.txt")
-        self.target_col = target_col
-        self.master_sheet = master_sheet
-        self.template_sheet = template_sheet
-
-        # 中间数据
-        self.master_df: Optional[pd.DataFrame] = None
-        self.template_df: Optional[pd.DataFrame] = None
-        self.template_type: str = "standard"  # "standard" | "chowbus"
-        self.chowbus_rows: Optional[List[Dict[str, Any]]] = None
-        self.schema_result: Optional[Dict[str, Any]] = None
-        self.token_results: Optional[List[Dict[str, Any]]] = None
-        self.master_canonical: Optional[List[Dict[str, Any]]] = None
-        self.template_canonical: Optional[List[Dict[str, Any]]] = None
-        self.validated_tokens: Optional[List[Dict[str, Any]]] = None
-        self.match_results: Optional[List[Dict[str, Any]]] = None
-        self.report: str = ""
-        self.console_summary: str = ""
-
-        # 错误信息
-        self.error: Optional[str] = None
-        self.error_step: Optional[str] = None
-
-        # 统计
-        self.api_call_count: int = 0
-
-    def set_error(self, step: str, msg: str) -> None:
-        """记录错误并阻止后续步骤。"""
-        self.error = msg
-        self.error_step = step
-
-    @property
-    def has_error(self) -> bool:
-        return self.error is not None
-
-
 # ── 管线节点 ────────────────────────────────────────────────────
 
 
-def step_load_data(state: PipelineStateDict) -> PipelineStateDict:
+def step_load_data(state: PipelineState) -> PipelineState:
     """Step 1: 读取主数据表和模板表 + 模板类型检测。"""
     if state.get("error") is not None:
         return state
@@ -215,7 +162,7 @@ def step_load_data(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_preprocess(state: PipelineStateDict) -> PipelineStateDict:
+def step_preprocess(state: PipelineState) -> PipelineState:
     """Step 1.5: chowbus 预处理 — 收集散列字段 → Token 分类 → 标准化为 Canonical。
 
     对 standard 类型透明跳过。
@@ -283,7 +230,7 @@ def step_preprocess(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_analyze_schema(state: PipelineStateDict) -> PipelineStateDict:
+def step_analyze_schema(state: PipelineState) -> PipelineState:
     """Step 2: Schema Analyzer 分析模板字段语义。"""
     if state.get("error") is not None:
         return state
@@ -298,7 +245,7 @@ def step_analyze_schema(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_classify_tokens(state: PipelineStateDict) -> PipelineStateDict:
+def step_classify_tokens(state: PipelineState) -> PipelineState:
     """Step 3: Token Classifier 解析组合字段。"""
     if state.get("error") is not None:
         return state
@@ -322,7 +269,7 @@ def step_classify_tokens(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_normalize(state: PipelineStateDict) -> PipelineStateDict:
+def step_normalize(state: PipelineState) -> PipelineState:
     """Step 4: Rule Engine — 主数据 + 模板标准化为 Canonical Schema。"""
     if state.get("error") is not None:
         return state
@@ -341,7 +288,7 @@ def step_normalize(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_validate(state: PipelineStateDict) -> PipelineStateDict:
+def step_validate(state: PipelineState) -> PipelineState:
     """Step 5: Rule Engine — Token 验证 + 必要维度检查。"""
     if state.get("error") is not None:
         return state
@@ -361,7 +308,7 @@ def step_validate(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def step_match(state: PipelineStateDict) -> PipelineStateDict:
+def step_match(state: PipelineState) -> PipelineState:
     """Step 6: Matching Engine — 模板行 → 主数据行匹配。"""
     if state.get("error") is not None:
         return state
@@ -375,7 +322,7 @@ def step_match(state: PipelineStateDict) -> PipelineStateDict:
     return state
 
 
-def _assert_product_name_integrity(state: PipelineStateDict) -> None:
+def _assert_product_name_integrity(state: PipelineState) -> None:
     """验证模板商品名称从原始读取到匹配前保持一致。
 
     对比 state["template_df"]（原始 Excel 读取值）与
@@ -418,7 +365,7 @@ def _assert_product_name_integrity(state: PipelineStateDict) -> None:
         )
 
 
-def step_write_output(state: PipelineStateDict) -> PipelineStateDict:
+def step_write_output(state: PipelineState) -> PipelineState:
     """Step 7: 写入结果 Excel + 校验报告。"""
     if state.get("error") is not None:
         return state
@@ -468,7 +415,7 @@ def build_graph():
     """
     from langgraph.graph import END, StateGraph
 
-    graph = StateGraph(PipelineStateDict)
+    graph = StateGraph(PipelineState)
 
     graph.add_node("load_data", step_load_data)
     graph.add_node("preprocess", step_preprocess)
