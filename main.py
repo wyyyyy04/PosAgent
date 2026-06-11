@@ -487,17 +487,17 @@ def run(args: Optional[list] = None) -> int:
     )
     elapsed = time.time() - t0
 
-    if state.has_error:
-        print(f"\n[FAIL] 管线在 '{state.error_step}' 步骤失败:")
-        print(f"       {state.error}")
+    if state.get("error") is not None:
+        print(f"\n[FAIL] 管线在 '{state["error_step"]}' 步骤失败:")
+        print(f"       {state["error"]}")
         print(f"      耗时: {elapsed:.1f}s")
         return 1
 
     # 输出控制台摘要
-    api_calls = state.api_call_count if hasattr(state, 'api_call_count') else "?"
+    api_calls = state["api_call_count"] if state.get("api_call_count") is not None else "?"
     print(f"\n[OK] 映射完成!  API 调用: {api_calls} 次  总耗时: {elapsed:.1f}s\n")
 
-    summary = getattr(state, 'console_summary', '') or state.report
+    summary = state.get("console_summary", "") or state["report"]
     if summary:
         # 使用 buffer 写入以支持 emoji（Windows GBK 控制台兼容）
         try:
@@ -507,12 +507,12 @@ def run(args: Optional[list] = None) -> int:
             print(summary)
     else:
         # 兜底摘要
-        total = len(state.match_results)
-        high = sum(1 for r in state.match_results if r.get("confidence") == "HIGH")
+        total = len(state["match_results"])
+        high = sum(1 for r in state["match_results"] if r.get("confidence") == "HIGH")
         print(f"     总行数:   {total}")
         print(f"     高置信度: {high} ({100*high/total:.1f}%)")
 
-    if state.report and state.report_path:
+    if state["report"] and state["report_path"]:
         # 报告已在 workflow 写入文件，确认路径
         pass
 
