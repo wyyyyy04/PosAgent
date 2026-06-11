@@ -465,7 +465,13 @@ def run(args: Optional[list] = None) -> int:
     # 批量模式：注入 Token Classifier 兜底回调，避免未知词交互阻塞
     if _batch_mode:
         from agent.token_classifier import set_prompt_hook as tc_set_prompt_hook
-        tc_set_prompt_hook(lambda word, context: {"action": "unknown"})
+        tc_set_prompt_hook(
+            lambda word, context, llm_suggestion: (
+                {"action": "add", "type": llm_suggestion}
+                if llm_suggestion
+                else {"action": "unknown"}
+            )
+        )
 
     # 运行管线（read_master 内部会应用 column_aliases 自动重命名）
     t0 = time.time()

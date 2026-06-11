@@ -3,14 +3,18 @@ Token Classifier — 纯规则组合字段解析 + 未知词兜底。
 将模板中逗号分隔的复合字段（如"口味做法组合"）拆分为结构化 Token，
 识别每个 Token 的类型（茶底/奶底/糖度/温度）和缺失维度。
 
-三级兜底机制：
+四级兜底机制：
   Step 1: data.token_dict 标准词典
   Step 2: data.memory 长期记忆（用户确认过的词）
-  Step 3: 交互式询问用户（同一词每进程只问一次）
+  Step 3: LLM 猜测（同词仅调一次，进程内缓存）
+  Step 4: 交互式询问 / 批量模式自动处理
 """
 
+import json
+import re
 from typing import Any, Dict, List, Optional
 
+import config
 from data.memory import add_token as mem_add_token
 from data.memory import get_token_type as mem_get_token_type
 from data.token_dict import lookup, normalize_token, UNKNOWN_TOKEN
@@ -21,7 +25,10 @@ ALL_DIMENSIONS = ["茶底", "奶底", "糖度", "温度"]
 # UNKNOWN_TOKEN 映射为 "UNKNOWN" 以保持输出兼容
 _UNKNOWN_TYPE = "UNKNOWN"
 
-# 合法类型列表（供交互式询问展示）
+# 自动分类标记（批量模式 LLM 高置信）
+_AUTO_CLASSIFIED_HIGH = "AUTO_CLASSIFIED_HIGH"
+
+# 合法类型列表（供交互式询问展示 + LLM 输出校验）
 _VALID_TYPE_NAMES = ["茶底", "奶底", "糖度", "温度", "规格"]
 
 # ── API 调用计数器（纯规则模式始终为 0） ─────────────────────────
@@ -42,44 +49,145 @@ def reset_api_call_count() -> None:
 
 _cache: Dict[str, Dict[str, Any]] = {}
 
-# 进程内「已询问过」的未知词集合（同一词本进程只问一次）
-_asked_this_session: set = set()
+# 进程内「已询问过」的未知词集合（用户确认过的映射，同词不重复确认）
+_asked_this_session: Dict[str, str] = {}
+
+# LLM 猜测缓存（同词仅调一次 LLM）
+_llm_guess_cache: Dict[str, str] = {}
 
 
 def reset_cache() -> None:
-    """清空缓存（用于测试）。"""
+    """清空所有缓存：分类缓存 + 会话询问缓存 + LLM 猜测缓存。"""
     _cache.clear()
-    global _asked_this_session
-    _asked_this_session = set()
+    global _asked_this_session, _llm_guess_cache
+    _asked_this_session = {}
+    _llm_guess_cache = {}
 
 
 def reset_session_asked() -> None:
     """清空「已询问」集合（仅测试用）。"""
-    global _asked_this_session
-    _asked_this_session = set()
+    global _asked_this_session, _llm_guess_cache
+    _asked_this_session = {}
+    _llm_guess_cache = {}
+
+
+# ── LLM Token 类型猜测 ──────────────────────────────────────────
+
+_LLM_SUGGEST_SYSTEM = """\
+You are a token classifier for beverage recipes.
+Given an unknown token and its context, classify which category it belongs to.
+
+Categories: 茶底(tea_base), 奶底(milk_base), 糖度(sugar), 温度(temperature), 规格(size)
+
+Rules:
+- If the token looks like a tea/coffee ingredient → 茶底
+- If it looks like dairy/milk/plant milk → 奶底
+- If it contains numbers or describes sweetness → 糖度
+- If it describes ice/heat level → 温度
+- If it mentions cup size/bottle → 规格
+- If truly unsure → 未知
+
+Return ONLY one word: 茶底 / 奶底 / 糖度 / 温度 / 规格 / 未知
+No explanation, no JSON, just the category name."""
+
+_LLM_SUGGEST_USER = 'Token: "{word}"\nContext: {context}\nCategory:'
+
+
+def _llm_suggest_type(word: str, context: str) -> Optional[str]:
+    """调用 LLM 猜测未知 token 的类型。
+
+    Args:
+        word: 未知 token（已 normalize）。
+        context: 所在行完整值。
+
+    Returns:
+        猜测的类型（茶底/奶底/糖度/温度/规格）或 None（失败/返回"未知"）。
+    """
+    if word in _llm_guess_cache:
+        return _llm_guess_cache[word]
+
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": _LLM_SUGGEST_SYSTEM},
+                {"role": "user", "content": _LLM_SUGGEST_USER.format(
+                    word=word, context=context
+                )},
+            ],
+            temperature=0.1,
+            max_tokens=10,
+        )
+        raw = response.choices[0].message.content or ""
+        guessed = raw.strip()
+    except Exception:
+        _llm_guess_cache[word] = None
+        return None
+
+    # 校验返回值：在合法类型列表内 → high confidence
+    if guessed in _VALID_TYPE_NAMES:
+        _llm_guess_cache[word] = guessed
+        return guessed
+
+    # "未知" 或无效值 → low confidence
+    _llm_guess_cache[word] = None
+    return None
+
+
+def _get_client():
+    """获取 DeepSeek API 客户端（延迟导入）。"""
+    from openai import OpenAI
+    return OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.DEEPSEEK_BASE_URL)
 
 
 # ── 交互式未知词确认 ────────────────────────────────────────────
 
 
-def prompt_user_for_unknown(word: str, context: str) -> Optional[Dict[str, Any]]:
-    """交互式询问用户如何处理未知词。
+def prompt_user_for_unknown(
+    word: str,
+    context: str,
+    llm_suggestion: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """交互式询问用户如何处理未知词（含 LLM 猜测提示）。
 
     此函数可被外部 mock 替换（测试时注入自定义回调）。
 
     Args:
         word: 未知 token 文本（已 normalize）。
         context: 所在行的组合字段完整值，供用户参考。
+        llm_suggestion: LLM 猜测的类型（茶底/奶底/糖度/温度/规格）或 None。
 
     Returns:
         {"action": "add", "type": "茶底"}   → 加入记忆并继续
         {"action": "unknown"}              → 标记为 UNKNOWN 继续
         {"action": "skip"}                 → 跳过此行
     """
+    has_suggestion = llm_suggestion and llm_suggestion in _VALID_TYPE_NAMES
+
     print(f"\n{'='*56}")
     print(f"[未知词] 无法识别的 Token: 「{word}」")
     print(f"  所在行上下文: {context}")
+    if has_suggestion:
+        print(f"  LLM 猜测: {llm_suggestion}")
     print(f"{'='*56}")
+
+    if has_suggestion:
+        print(f"  [y] 确认，加入{llm_suggestion}词典")
+        print(f"  [n] 不对，我手动选择类型")
+        print(f"  [s] 跳过")
+        while True:
+            choice = input("  请输入 y/n/s: ").strip().lower()
+            if choice == "y":
+                return {"action": "add", "type": llm_suggestion}
+            elif choice == "n":
+                break  # 进入手动选择流程
+            elif choice == "s":
+                return {"action": "skip"}
+            else:
+                print("  [错误] 无效输入，请输入 y、n 或 s")
+
+    # LLM 低置信 / 失败 / 用户选 n → 手动选择
     print("  请选择处理方式:")
     print("    1. 加入词典（需选择类型）")
     print("    2. 标记为 UNKNOWN（继续处理）")
@@ -90,14 +198,15 @@ def prompt_user_for_unknown(word: str, context: str) -> Optional[Dict[str, Any]]
         if choice == "1":
             while True:
                 print(f"  可选类型: {', '.join(_VALID_TYPE_NAMES)}")
-                type_choice = input(f"  请选择「{word}」的类型 (1=茶底 2=奶底 3=糖度 4=温度 5=规格): ").strip()
+                type_choice = input(
+                    f"  请选择「{word}」的类型 (1=茶底 2=奶底 3=糖度 4=温度 5=规格): "
+                ).strip()
                 type_map = {
                     "1": "茶底", "2": "奶底", "3": "糖度",
                     "4": "温度", "5": "规格",
                 }
                 if type_choice in type_map:
                     return {"action": "add", "type": type_map[type_choice]}
-                # 也支持直接输入中文类型名
                 if type_choice in _VALID_TYPE_NAMES:
                     return {"action": "add", "type": type_choice}
                 print(f"  [错误] 无效类型，请重新选择")
@@ -135,7 +244,12 @@ def _classify_one(composite_value: str) -> Dict[str, Any]:
     2. normalize_token() 去后缀
     3. token_dict.lookup() 分类（Step 1）
     4. 未命中 → 查 memory.py（Step 2）
-    5. 仍未命中 → 交互式询问用户（Step 3，同词仅问一次）
+    5. 未命中 → 查 _asked_this_session（用户确认过）
+    6. 未命中 → LLM 猜测（Step 3，同词仅调一次）
+    7. LLM 高置信 + 批量模式 → AUTO_CLASSIFIED_HIGH
+    8. LLM 低置信 + 批量模式 → UNKNOWN（调 hook 兜底）
+    9. LLM 高置信 + 交互 → 展示 y/n 确认
+    10. LLM 低置信/失败 + 交互 → 手动选择
 
     Args:
         composite_value: 组合字段原始字符串（如 "红茶, 十二分糖, 温热"）。
@@ -171,25 +285,34 @@ def _classify_one(composite_value: str) -> Dict[str, Any]:
                 tokens.append({"value": cleaned, "type": token_type})
                 continue
 
-            # Step 3: 交互式询问（同词仅问一次）
+            # Step 3: 查 _asked_this_session（本进程已确认过）
             if cleaned in _asked_this_session:
-                token_type = _UNKNOWN_TYPE
-            else:
-                _asked_this_session.add(cleaned)
-                hook = _prompt_hook if _prompt_hook else prompt_user_for_unknown
-                response = hook(cleaned, composite_value)
-
-                if response["action"] == "add":
-                    mem_add_token(cleaned, response["type"])
-                    token_type = response["type"]
-                    types_found.add(token_type)
+                token_type = _asked_this_session[cleaned]
+                if token_type == _UNKNOWN_TYPE:
                     tokens.append({"value": cleaned, "type": token_type})
                     continue
-                elif response["action"] == "skip":
-                    skipped = True
-                    token_type = _UNKNOWN_TYPE
-                else:  # "unknown"
-                    token_type = _UNKNOWN_TYPE
+                types_found.add(token_type)
+                tokens.append({"value": cleaned, "type": token_type})
+                continue
+
+            # Step 4: LLM 猜测（同词仅调一次）
+            llm_type = _llm_suggest_type(cleaned, composite_value)
+
+            # Step 5: 统一分发 — hook 或默认交互
+            handler = _prompt_hook if _prompt_hook else prompt_user_for_unknown
+            response = handler(cleaned, composite_value, llm_type)
+
+            if response["action"] == "add":
+                mem_add_token(cleaned, response["type"])
+                _asked_this_session[cleaned] = response["type"]
+                token_type = response["type"]
+                types_found.add(token_type)
+                tokens.append({"value": cleaned, "type": token_type})
+                continue
+            elif response["action"] == "skip":
+                skipped = True
+            _asked_this_session[cleaned] = _UNKNOWN_TYPE
+            token_type = _UNKNOWN_TYPE
         else:
             types_found.add(token_type)
 
@@ -349,13 +472,13 @@ if __name__ == "__main__":
     check(result2["missing"] == [], "无缺失")
     print()
 
-    # ── 3. 全新未知词 → 模拟用户选择「加入词典」 ──
+    # ── 3. 全新未知词 → 模拟用户选择「加入词典」──
     print("3. 全新未知词 — 模拟用户输入 1 + 1（加入茶底）")
 
     # 模拟 hook：第一次询问 → add as 茶底
     call_count = [0]
 
-    def mock_hook_1(word, context):
+    def mock_hook_1(word, context, llm_suggestion=None):
         call_count[0] += 1
         print(f"  [MOCK] 询问未知词: '{word}', 上下文: '{context}'")
         print(f"  [MOCK] 用户选择 1 → 加入词典，类型 1（茶底）")
@@ -364,9 +487,11 @@ if __name__ == "__main__":
     set_prompt_hook(mock_hook_1)
     reset_cache()
     reset_session_asked()
+    # 预置 LLM 缓存为 None，强制走 hook 兜底流程（模拟 LLM 低置信）
+    _llm_guess_cache["豆乳奶茶"] = None
 
     result3 = classify_single("豆乳奶茶, 正常冰, 七分糖")
-    check(call_count[0] == 1, "触发了 1 次询问（'豆乳奶茶' 未知）")
+    check(call_count[0] == 1, f"触发了 1 次询问（实际 {call_count[0]}）")
     check(mem_get("豆乳奶茶") == "茶底", "写入记忆后可查到 '豆乳奶茶' = 茶底")
     t3 = {t["type"]: t["value"] for t in result3["tokens"]}
     check(t3.get("茶底") == "豆乳奶茶", "分类结果中 '豆乳奶茶' type=茶底")
@@ -384,12 +509,12 @@ if __name__ == "__main__":
     check(result4["missing"] == [], "无缺失")
     print()
 
-    # ── 5. 同进程内同词不重复询问（_asked_this_session） ──
+    # ── 5. 同进程内同词不重复询问（_asked_this_session 缓存） ──
     print("5. 同进程内同词不重复询问（_asked_this_session 缓存）")
     reset_memory()
     call_count[0] = 0
 
-    def mock_hook_2(word, context):
+    def mock_hook_2(word, context, llm_suggestion=None):
         call_count[0] += 1
         print(f"  [MOCK] 询问: '{word}' → 用户选 2（标 UNKNOWN）")
         return {"action": "unknown"}
@@ -397,6 +522,7 @@ if __name__ == "__main__":
     set_prompt_hook(mock_hook_2)
     reset_cache()
     reset_session_asked()
+    _llm_guess_cache["抹茶粉"] = None  # 模拟 LLM 低置信，强制走 hook
 
     # 同一个词出现两次，两次都在不同行
     r5a = classify_single("抹茶粉, 去冰")
@@ -412,13 +538,14 @@ if __name__ == "__main__":
     # ── 6. 模拟用户选择「跳过此行」 ──
     print("6. 模拟用户选择「跳过此行」")
 
-    def mock_hook_3(word, context):
+    def mock_hook_3(word, context, llm_suggestion=None):
         print(f"  [MOCK] 询问: '{word}' → 用户选 3（跳过）")
         return {"action": "skip"}
 
     set_prompt_hook(mock_hook_3)
     reset_cache()
     reset_session_asked()
+    _llm_guess_cache["未知成分X"] = None  # 模拟 LLM 低置信
 
     result6 = classify_single("未知成分X, 正常冰")
     check(result6.get("_skipped") is True, "结果标记 _skipped=True")
@@ -502,7 +629,172 @@ if __name__ == "__main__":
     check(r12a == r12b, "相同值命中缓存，结果一致")
     print()
 
-    # 清理：清除 hook
+    # ── 13. LLM 猜测 + 交互模式：高置信，选 y 确认 ──
+    print("13. LLM 猜测 + 交互模式：高置信，选 y 确认")
+    reset_cache()
+    reset_session_asked()
+    reset_memory()
+
+    _llm_guess_cache["龙井茶底"] = "茶底"
+
+    def mock_y_hook(word, context, llm_suggestion=None):
+        print(f"  [MOCK] LLM 猜测: {llm_suggestion}, 用户选 y 确认")
+        return {"action": "add", "type": llm_suggestion}
+
+    set_prompt_hook(mock_y_hook)
+    r13 = classify_single("龙井茶底, 正常冰")
+    t13 = {t["type"]: t["value"] for t in r13["tokens"]}
+    check(t13.get("茶底") == "龙井茶底", "选 y 后 type=茶底")
+    check(_asked_this_session.get("龙井茶底") == "茶底",
+          f"_asked_this_session 存为茶底（实际 {_asked_this_session.get('龙井茶底')}）")
+    check(mem_get("龙井茶底") == "茶底", "已写入长期记忆")
+    print()
+    set_prompt_hook(None)
+
+    # ── 14. LLM 猜测 + 交互模式：高置信，选 n → 手动流程 ──
+    print("14. LLM 猜测 + 交互模式：高置信，选 n → 手动")
+    reset_cache()
+    reset_session_asked()
+    set_prompt_hook(None)
+    reset_memory()
+
+    def mock_n_hook(word, context, llm_suggestion=None):
+        print(f"  [MOCK] LLM 猜测: {llm_suggestion}, 用户选 n")
+        # 返回 None 表示进入手动流程
+        return {"action": "add", "type": "奶底"}  # 模拟用户手动选了奶底
+
+    _llm_guess_cache["抹茶拿铁"] = "茶底"  # LLM 猜茶底，但用户选 n 改成奶底
+
+    set_prompt_hook(mock_n_hook)
+    r14 = classify_single("抹茶拿铁, 去冰")
+    t14 = {t["type"]: t["value"] for t in r14["tokens"]}
+    check(t14.get("奶底") == "抹茶拿铁", "用户选 n 后手动选奶底 → type=奶底")
+    check(_asked_this_session["抹茶拿铁"] == "奶底", "_asked_this_session 存的是奶底（覆盖 LLM 猜测）")
+    print()
+    set_prompt_hook(None)
+
+    # ── 15. LLM 低置信 + 交互模式 → 直接手动流程 ──
+    print("15. LLM 低置信 + 交互模式 → 直接手动流程")
+    reset_cache()
+    reset_session_asked()
+
+    def mock_manual_hook(word, context, llm_suggestion=None):
+        print(f"  [MOCK] LLM 猜测: {llm_suggestion}, 进入手动流程")
+        return {"action": "add", "type": "温度"}  # 用户手动选温度
+
+    _llm_guess_cache["冰博客"] = None  # 模拟 LLM 低置信
+
+    set_prompt_hook(mock_manual_hook)
+    r15 = classify_single("冰博客, 少冰")
+    t15 = {t["type"]: t["value"] for t in r15["tokens"]}
+    check("奶底" != t15.get("奶底"), "LLM 低置信时 llm_suggestion=None，hook 直接收到 None")
+    print()
+    set_prompt_hook(None)
+
+    # ── 16. LLM 高置信 + 批量模式 → AUTO_CLASSIFIED_HIGH ──
+    print("16. LLM 高置信 + 批量模式 → AUTO_CLASSIFIED_HIGH")
+    reset_cache()
+    reset_session_asked()
+    reset_memory()
+
+    def batch_hook(word, context, llm_suggestion=None):
+        print(f"  [MOCK] 批量 hook: LLM 猜测={llm_suggestion}")
+        if llm_suggestion:
+            return {"action": "add", "type": llm_suggestion}
+        return {"action": "unknown"}
+
+    _llm_guess_cache["玫瑰普洱"] = "茶底"
+
+    set_prompt_hook(batch_hook)
+    r16 = classify_single("玫瑰普洱, 正常冰, 七分糖")
+    t16 = {t["type"]: t["value"] for t in r16["tokens"]}
+    check(t16.get("茶底") == "玫瑰普洱", "批量 LLM 高置信 → hook 接受 → type=茶底")
+    check(_asked_this_session.get("玫瑰普洱") == "茶底",
+          f"_asked_this_session 存为茶底（实际 {_asked_this_session.get('玫瑰普洱')}）")
+    checked_mem = mem_get_token_type("玫瑰普洱")
+    check(checked_mem == "茶底", f"已写入长期记忆（实际 {checked_mem}）")
+    print()
+    set_prompt_hook(None)
+
+    # ── 17. LLM 低置信 + 批量模式 → UNKNOWN，无交互 ──
+    print("17. LLM 低置信 + 批量模式 → UNKNOWN，无交互")
+    reset_cache()
+    reset_session_asked()
+
+    call_count[0] = 0
+
+    def batch_hook_2(word, context, llm_suggestion=None):
+        call_count[0] += 1
+        return {"action": "unknown"}
+
+    _llm_guess_cache["奇异果酱"] = None  # LLM 低置信
+
+    set_prompt_hook(batch_hook_2)
+    r17 = classify_single("奇异果酱, 少冰")
+    t17 = {t["type"]: t["value"] for t in r17["tokens"]}
+    check(t17.get("UNKNOWN") == "奇异果酱", "LLM 低置信 → UNKNOWN")
+    check(call_count[0] == 1, "批量 hook 被调 1 次作为兜底")
+    check(_asked_this_session.get("奇异果酱") == _UNKNOWN_TYPE,
+          "_asked_this_session 标为 UNKNOWN")
+    print()
+    set_prompt_hook(None)
+
+    # ── 18. LLM 失败 + 批量模式 → UNKNOWN，继续运行 ──
+    print("18. LLM 失败 + 批量模式 → UNKNOWN，继续运行")
+    reset_cache()
+    reset_session_asked()
+
+    call_count[0] = 0
+
+    def batch_hook_3(word, context, llm_suggestion=None):
+        call_count[0] += 1
+        return {"action": "unknown"}
+
+    set_prompt_hook(batch_hook_3)
+    r18 = classify_single("火星陨石粉, 去冰")
+    t18 = {t["type"]: t["value"] for t in r18["tokens"]}
+    check(t18.get("UNKNOWN") == "火星陨石粉", "LLM 失败 → UNKNOWN")
+    check(call_count[0] == 1, "批量 hook 被调 1 次兜底")
+    print()
+    set_prompt_hook(None)
+
+    # ── 19. 同词第二次不重复调 LLM（_llm_guess_cache 命中） ──
+    print("19. 同词第二次不重复调 LLM（_llm_guess_cache 命中）")
+    reset_cache()
+    reset_session_asked()
+
+    call_count[0] = 0
+
+    def cache_hit_hook(word, context, llm_suggestion=None):
+        call_count[0] += 1
+        if llm_suggestion:
+            return {"action": "add", "type": llm_suggestion}
+        return {"action": "unknown"}
+
+    _llm_guess_cache["茉莉花茶"] = "茶底"
+
+    set_prompt_hook(cache_hit_hook)
+    r19a = classify_single("茉莉花茶, 温热")
+    r19b = classify_single("茉莉花茶, 少冰")
+    t19a = {t["type"]: t["value"] for t in r19a["tokens"]}
+    t19b = {t["type"]: t["value"] for t in r19b["tokens"]}
+    check(t19a.get("茶底") == "茉莉花茶", "第一次命中 LLM 缓存 → hook 收到 llm_suggestion")
+    check(call_count[0] == 1, f"hook 仅调用 1 次（第一次；第二次命中 _asked_this_session）实际 {call_count[0]}")
+    check(t19b.get("茶底") == "茉莉花茶", "第二次命中 _asked_this_session，不触发 hook")
+    print()
+
+    # ── 20. reset_cache() 清空全部三个缓存 ──
+    print("20. reset_cache() 清空全部三个缓存")
+    _cache["test_key"] = {"dummy": True}
+    _asked_this_session["test_word"] = "茶底"
+    _llm_guess_cache["test_word"] = "茶底"
+    reset_cache()
+    check(len(_cache) == 0, "_cache 已清空")
+    check(len(_asked_this_session) == 0, "_asked_this_session 已清空")
+    check(len(_llm_guess_cache) == 0, "_llm_guess_cache 已清空")
+    print()
+
+    # 清理
     set_prompt_hook(None)
 
     # ── 汇总 ──
