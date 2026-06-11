@@ -183,7 +183,7 @@ class PipelineState:
 # ── 管线节点 ────────────────────────────────────────────────────
 
 
-def step_load_data(state: PipelineState) -> PipelineState:
+def step_load_data(state: PipelineStateDict) -> PipelineStateDict:
     """Step 1: 读取主数据表和模板表 + 模板类型检测。"""
     if state.get("error") is not None:
         return state
@@ -215,7 +215,7 @@ def step_load_data(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_preprocess(state: PipelineState) -> PipelineState:
+def step_preprocess(state: PipelineStateDict) -> PipelineStateDict:
     """Step 1.5: chowbus 预处理 — 收集散列字段 → Token 分类 → 标准化为 Canonical。
 
     对 standard 类型透明跳过。
@@ -283,7 +283,7 @@ def step_preprocess(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_analyze_schema(state: PipelineState) -> PipelineState:
+def step_analyze_schema(state: PipelineStateDict) -> PipelineStateDict:
     """Step 2: Schema Analyzer 分析模板字段语义。"""
     if state.get("error") is not None:
         return state
@@ -298,7 +298,7 @@ def step_analyze_schema(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_classify_tokens(state: PipelineState) -> PipelineState:
+def step_classify_tokens(state: PipelineStateDict) -> PipelineStateDict:
     """Step 3: Token Classifier 解析组合字段。"""
     if state.get("error") is not None:
         return state
@@ -322,7 +322,7 @@ def step_classify_tokens(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_normalize(state: PipelineState) -> PipelineState:
+def step_normalize(state: PipelineStateDict) -> PipelineStateDict:
     """Step 4: Rule Engine — 主数据 + 模板标准化为 Canonical Schema。"""
     if state.get("error") is not None:
         return state
@@ -341,7 +341,7 @@ def step_normalize(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_validate(state: PipelineState) -> PipelineState:
+def step_validate(state: PipelineStateDict) -> PipelineStateDict:
     """Step 5: Rule Engine — Token 验证 + 必要维度检查。"""
     if state.get("error") is not None:
         return state
@@ -361,7 +361,7 @@ def step_validate(state: PipelineState) -> PipelineState:
     return state
 
 
-def step_match(state: PipelineState) -> PipelineState:
+def step_match(state: PipelineStateDict) -> PipelineStateDict:
     """Step 6: Matching Engine — 模板行 → 主数据行匹配。"""
     if state.get("error") is not None:
         return state
@@ -375,7 +375,7 @@ def step_match(state: PipelineState) -> PipelineState:
     return state
 
 
-def _assert_product_name_integrity(state: PipelineState) -> None:
+def _assert_product_name_integrity(state: PipelineStateDict) -> None:
     """验证模板商品名称从原始读取到匹配前保持一致。
 
     对比 state["template_df"]（原始 Excel 读取值）与
@@ -418,7 +418,7 @@ def _assert_product_name_integrity(state: PipelineState) -> None:
         )
 
 
-def step_write_output(state: PipelineState) -> PipelineState:
+def step_write_output(state: PipelineStateDict) -> PipelineStateDict:
     """Step 7: 写入结果 Excel + 校验报告。"""
     if state.get("error") is not None:
         return state
@@ -468,18 +468,16 @@ def build_graph():
     """
     from langgraph.graph import END, StateGraph
 
-    # 由于 PipelineState 不是 TypedDict，使用简单 dict 作为状态载体
-    # 实际运行时会传入 PipelineState 实例
-    graph = StateGraph(dict)
+    graph = StateGraph(PipelineStateDict)
 
-    graph.add_node("load_data", _dict_node_wrapper(step_load_data))
-    graph.add_node("preprocess", _dict_node_wrapper(step_preprocess))
-    graph.add_node("analyze_schema", _dict_node_wrapper(step_analyze_schema))
-    graph.add_node("classify_tokens", _dict_node_wrapper(step_classify_tokens))
-    graph.add_node("normalize", _dict_node_wrapper(step_normalize))
-    graph.add_node("validate", _dict_node_wrapper(step_validate))
-    graph.add_node("match", _dict_node_wrapper(step_match))
-    graph.add_node("write_output", _dict_node_wrapper(step_write_output))
+    graph.add_node("load_data", step_load_data)
+    graph.add_node("preprocess", step_preprocess)
+    graph.add_node("analyze_schema", step_analyze_schema)
+    graph.add_node("classify_tokens", step_classify_tokens)
+    graph.add_node("normalize", step_normalize)
+    graph.add_node("validate", step_validate)
+    graph.add_node("match", step_match)
+    graph.add_node("write_output", step_write_output)
 
     graph.set_entry_point("load_data")
     graph.add_edge("load_data", "preprocess")
@@ -492,25 +490,6 @@ def build_graph():
     graph.add_edge("write_output", END)
 
     return graph.compile()
-
-
-def _dict_node_wrapper(node_fn):
-    """将基于 PipelineState 的节点函数包装为接受/返回 dict 的形式。"""
-
-    def wrapper(state: dict) -> dict:
-        # 从 dict 中恢复 PipelineState（现为 PipelineStateDict）
-        ps = state.get("_pipeline_state")
-        if ps is None:
-            return state
-        node_fn(ps)
-        # 同步关键字段到外层 dict
-        state["_pipeline_state"] = ps
-        state["error"] = ps.get("error")
-        state["match_results"] = ps.get("match_results")
-        state["report"] = ps.get("report", "")
-        return state
-
-    return wrapper
 
 
 # ── 公开 API ────────────────────────────────────────────────────
@@ -568,14 +547,12 @@ def run_pipeline(
 
     if use_langgraph:
         app = build_graph()
-        result = app.invoke({"_pipeline_state": state})
-        # 从结果 dict 中恢复 PipelineState
-        ps = result.get("_pipeline_state", state)
+        result = app.invoke(state)
         # 收集 API 调用统计
         from agent.schema_analyzer import get_api_call_count as _sa_count
         from agent.token_classifier import get_api_call_count as _tc_count
-        ps.api_call_count = _sa_count() + _tc_count()
-        return ps
+        result["api_call_count"] = _sa_count() + _tc_count()
+        return result
 
     # 纯顺序执行
     steps = [
@@ -801,9 +778,50 @@ if __name__ == "__main__":
         )
         print()
 
-        # ── 8. LangGraph 路径测试 ──
-        # TODO: Step 3 删除 _dict_node_wrapper 后移除此 skip，恢复实际测试逻辑
-        print("8. LangGraph 路径和顺序路径结果一致 — SKIP (待 Step 3 _dict_node_wrapper 移除后恢复)")
+        # ── 8. LangGraph 路径和顺序路径结果一致 ──
+        print("8. LangGraph 路径和顺序路径结果一致")
+        # 重新写入最初的标准测试数据
+        pd.DataFrame({
+            "品名": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳", "珍珠奶茶"],
+            "杯型": ["中杯", "中杯", "大杯", "中杯"],
+            "奶底": ["牛奶", "牛奶", "", "椰乳"],
+            "做法": ["少冰", "去冰", "正常冰", "热"],
+            "糖": ["七分糖", "标准糖", "标准糖", "无糖"],
+            "SOP": [
+                "T240、B30/80、S4", "T265、B30/105、S5",
+                "T200、B50/100、S5", "T180、B40/80、S2",
+            ],
+        }).to_excel(master_path, index=False)
+
+        pd.DataFrame({
+            "菜品名称": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳"],
+            "规格": ["中杯", "中杯", "大杯"],
+            "口味做法组合": [
+                "牛奶, 少冰, 七分糖",
+                "牛奶, 去冰, 标准糖",
+                "正常冰, 标准糖",
+            ],
+            "配料": ["", "", ""],
+        }).to_excel(template_path, index=False)
+        tc_reset_cache()
+
+        # 顺序执行
+        state_seq = run_pipeline(master_path, template_path, output_path, use_langgraph=False)
+        check(state_seq.get("error") is None, "顺序执行无错误")
+        seq_sops = [r.get("sop", "") for r in state_seq["match_results"]]
+
+        # LangGraph 执行
+        state_lg = run_pipeline(master_path, template_path, output_path, use_langgraph=True)
+        check(state_lg.get("error") is None, "LangGraph 执行无错误")
+
+        if state_lg.get("error") is None:
+            lg_sops = [r.get("sop", "") for r in state_lg["match_results"]]
+            lg_confs = [r.get("confidence", "") for r in state_lg["match_results"]]
+            seq_confs = [r.get("confidence", "") for r in state_seq["match_results"]]
+            check(seq_sops == lg_sops, f"SOP 结果一致（顺序={len(seq_sops)}, LG={len(lg_sops)}）")
+            check(seq_confs == lg_confs, "置信度结果一致")
+            check(len(state_seq["match_results"]) == len(state_lg["match_results"]),
+                  f"匹配行数一致（{len(state_seq['match_results'])}）")
         print()
 
     finally:
