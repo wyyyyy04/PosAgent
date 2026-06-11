@@ -693,6 +693,56 @@ if __name__ == "__main__":
         )
         print()
 
+        # ── 8. LangGraph 路径和顺序路径结果一致 ──
+        print("8. LangGraph 路径和顺序路径结果一致")
+        # 重新写入最初的标准测试数据
+        pd.DataFrame({
+            "品名": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳", "珍珠奶茶"],
+            "杯型": ["中杯", "中杯", "大杯", "中杯"],
+            "奶底": ["牛奶", "牛奶", "", "椰乳"],
+            "做法": ["少冰", "去冰", "正常冰", "热"],
+            "糖": ["七分糖", "标准糖", "标准糖", "无糖"],
+            "SOP": [
+                "T240、B30/80、S4",
+                "T265、B30/105、S5",
+                "T200、B50/100、S5",
+                "T180、B40/80、S2",
+            ],
+        }).to_excel(master_path, index=False)
+
+        pd.DataFrame({
+            "菜品名称": ["浅浅清茶", "浅浅清茶", "黑糖波波牛乳"],
+            "规格": ["中杯", "中杯", "大杯"],
+            "口味做法组合": [
+                "牛奶, 少冰, 七分糖",
+                "牛奶, 去冰, 标准糖",
+                "正常冰, 标准糖",
+            ],
+            "配料": ["", "", ""],
+        }).to_excel(template_path, index=False)
+        tc_reset_cache()
+
+        # 顺序执行
+        state_seq = run_pipeline(master_path, template_path, output_path, use_langgraph=False)
+        check(not state_seq.has_error, f"顺序执行无错误（错误: {state_seq.error}）")
+        seq_sops = [r.get("sop", "") for r in state_seq.match_results]
+        seq_confs = [r.get("confidence", "") for r in state_seq.match_results]
+
+        # LangGraph 执行
+        state_lg = run_pipeline(master_path, template_path, output_path, use_langgraph=True)
+        check(not state_lg.has_error, f"LangGraph 执行无错误（错误: {state_lg.error}）")
+
+        if not state_lg.has_error:
+            lg_sops = [r.get("sop", "") for r in state_lg.match_results]
+            lg_confs = [r.get("confidence", "") for r in state_lg.match_results]
+            check(seq_sops == lg_sops, f"SOP 结果一致（顺序={len(seq_sops)}, LG={len(lg_sops)}）")
+            check(seq_confs == lg_confs, f"置信度结果一致")
+            check(
+                len(state_seq.match_results) == len(state_lg.match_results),
+                f"匹配行数一致（{len(state_seq.match_results)}）",
+            )
+        print()
+
     finally:
         # 清理临时文件
         for f in [master_path, template_path, output_path,
