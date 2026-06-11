@@ -2,7 +2,7 @@
 LangGraph 工作流定义 — 编排完整 POS 模板映射管线。
 
 节点顺序:
-  load_data → analyze_schema → classify_tokens → normalize → validate → match → write_output
+  load_data → preprocess → analyze_schema → classify_tokens → normalize → validate → match → write_output
 
 每个节点读取上一个节点的输出，写入本节点的结果。任一步骤失败可捕获并进入错误处理。
 兼容无 langgraph 安装环境，提供 run_pipeline() 作为纯顺序回退方案。
@@ -365,6 +365,7 @@ def build_graph():
     graph = StateGraph(dict)
 
     graph.add_node("load_data", _dict_node_wrapper(step_load_data))
+    graph.add_node("preprocess", _dict_node_wrapper(step_preprocess))
     graph.add_node("analyze_schema", _dict_node_wrapper(step_analyze_schema))
     graph.add_node("classify_tokens", _dict_node_wrapper(step_classify_tokens))
     graph.add_node("normalize", _dict_node_wrapper(step_normalize))
@@ -373,7 +374,8 @@ def build_graph():
     graph.add_node("write_output", _dict_node_wrapper(step_write_output))
 
     graph.set_entry_point("load_data")
-    graph.add_edge("load_data", "analyze_schema")
+    graph.add_edge("load_data", "preprocess")
+    graph.add_edge("preprocess", "analyze_schema")
     graph.add_edge("analyze_schema", "classify_tokens")
     graph.add_edge("classify_tokens", "normalize")
     graph.add_edge("normalize", "validate")
