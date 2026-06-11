@@ -447,10 +447,10 @@ REPL 内支持以下斜杠指令：
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 60/60 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词四级兜底**（词典→记忆→LLM猜测→交互）；LLM 先猜再确认(y/n)，批量模式自动写入；_llm_guess_cache 进程缓存 | `c83ec74` |
-| 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三级存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 49/49 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正/列别名/确认映射五级存储、**模板指纹缓存**（get/save_template_rule）、**确认映射**（build_confirmed_key/add_confirmed_mapping/get_confirmed_mapping）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
-| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 45/45 passed | **条件路由** (add_conditional_edges)、**Human Review 节点** (interrupt_before + resume)、**DataFrame 序列化适配器**、PipelineState(TypedDict)、8 步管线编排、LangGraph/纯顺序双模式 | `dc067cb` |
-| Human Review | cli/human_review.py | ✅ 已完成 | 10/10 passed | 低置信度行交互式审核（接受/手动/跳过/永久跳过）、run_review_silent 批量模式 | `dc067cb` |
+| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 51/51 passed | **条件路由**：`route_after_load`（error→write_output / chowbus→preprocess / standard→analyze_schema）、`route_after_match`（error→write_output / low_conf→human_review / high→write_output）；**checkpointer**：MemorySaver + _DataFrameSerde（DataFrame msgpack 序列化）；**interrupt_before**=["human_review"]（暂停→交互审核→update_state→resume）；PipelineState(TypedDict, total=False)；LangGraph 默认启用（`--no-langgraph` 回退纯顺序） | `dc067cb` |
+| Human Review | cli/human_review.py | ✅ 已完成 | 10/10 passed | 低置信度行交互式审核（接受/手动输入/本次跳过/永久跳过）、run_review_silent 批量模式；**长期记忆持久化**：`confirmed_mappings`（build_confirmed_key → add_confirmed_mapping → get_confirmed_mapping）；**修复**：match_corrections 类型冲突（list vs dict → 独立键 confirmed_mappings）、_compute_master_fingerprint 空路径守卫 | `dc067cb` |
 | CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**批量模式自动跳过交互**、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译 | `73fe576` |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
