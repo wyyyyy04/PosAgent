@@ -449,6 +449,8 @@ def route_after_match(state: PipelineState) -> str:
 
 def _compute_master_fingerprint(path: str) -> str:
     """计算主数据文件的内容指纹（MD5 前 8 位）。"""
+    if not path:
+        return ""
     import hashlib
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()[:8]
@@ -627,7 +629,7 @@ def run_pipeline(
     target_col: str = "配料",
     master_sheet: int = 0,
     template_sheet: int = 0,
-    use_langgraph: bool = False,
+    use_langgraph: bool = True,
 ) -> PipelineState:
     """运行完整的 POS 模板映射管线。
 
@@ -708,13 +710,31 @@ def run_pipeline(
         ("normalize", step_normalize),
         ("validate", step_validate),
         ("match", step_match),
-        ("write_output", step_write_output),
     ]
 
     for step_name, step_fn in steps:
         step_fn(state)
         if state.get("error") is not None:
             break
+
+    # Human Review：检查是否有低置信度行需要审核
+    if not state.get("error"):
+        low_conf_rows = [
+            r for r in state.get("match_results", [])
+            if r.get("confidence") == "LOW_CONFIDENCE"
+        ]
+        if low_conf_rows:
+            from cli.human_review import run_review
+            master_fp = _compute_master_fingerprint(
+                str(state.get("master_path", ""))
+            )
+            review_result = run_review(low_conf_rows, master_fp)
+            state["human_review_result"] = review_result
+            step_human_review(state)
+
+    # 输出
+    if not state.get("error"):
+        step_write_output(state)
 
     # 收集 API 调用统计
     from agent.schema_analyzer import get_api_call_count as _sa_count

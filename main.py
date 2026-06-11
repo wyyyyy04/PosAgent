@@ -61,8 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--langgraph",
         action="store_true",
-        default=False,
-        help="使用 LangGraph 编排管线（需安装 langgraph，默认顺序执行）",
+        default=True,
+        help="使用 LangGraph 编排管线（默认启用；--no-langgraph 回退到顺序执行）",
+    )
+    parser.add_argument(
+        "--no-langgraph",
+        action="store_false",
+        dest="langgraph",
+        help="禁用 LangGraph，使用纯顺序执行",
     )
 
     return parser

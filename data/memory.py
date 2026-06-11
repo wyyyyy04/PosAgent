@@ -87,6 +87,7 @@ def _default_structure() -> Dict[str, Any]:
         "template_rules": {},
         "match_corrections": [],
         "column_aliases": {},
+        "confirmed_mappings": {},
     }
 
 
@@ -258,7 +259,7 @@ def add_confirmed_mapping(key: str, sop: str) -> None:
     """
     global _dirty
     data = _load()
-    data.setdefault("match_corrections", {})[key] = {
+    data.setdefault("confirmed_mappings", {})[key] = {
         "sop": sop,
         "confirmed_at": date.today().isoformat(),
     }
@@ -276,7 +277,7 @@ def get_confirmed_mapping(key: str) -> Optional[str]:
         确认的 SOP 代码，或 None。
     """
     data = _load()
-    entry = data.get("match_corrections", {}).get(key)
+    entry = data.get("confirmed_mappings", {}).get(key)
     if entry and isinstance(entry, dict):
         return entry.get("sop")
     return None
