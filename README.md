@@ -425,17 +425,17 @@ REPL 内支持以下斜杠指令：
 
 | 模块 | 文件 | 状态 | 自测结果 | 备注 | Git commit |
 |------|------|------|----------|------|------|
-| 模板预处理 | agent/template_preprocessor.py | ✅ 已完成 | 32/32 passed | chowbus 模板类型检测、散列字段收集、中文值提取；comma-join 兼容 Token Classifier | `—` |
-| Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 24/24 passed | 读：主数据校验/多sheet/列名strip/raw读取；写：保留样式/列宽/置信度列/报告/**双表头模板支持** | `—` |
+| 模板预处理 | agent/template_preprocessor.py | ✅ 已完成 | 32/32 passed | chowbus 模板类型检测、散列字段收集、中文值提取；comma-join 兼容 Token Classifier | `73fe576` |
+| Excel 读写 | excel_io/excel_reader.py, excel_writer.py | ✅ 已完成 | 24/24 passed | 读：主数据校验/多sheet/列名strip/raw读取；写：保留样式/列宽/置信度列/报告/双表头支持/**sop_code 原始列填充** | `192934f` |
 | Token 词典 | data/token_dict.py | ✅ 已完成 | 47/47 passed | 5 种类型，28 个 Token；normalize_token() 四级优先级清洗；testdata 真数据补全茉莉绿茶 | `d2de102` |
-| Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 22/22 passed | 6 字段定义、主数据映射、Token 类型映射、通配维度 | `93ca42a` |
+| Canonical Schema | data/canonical_schema.py | ✅ 已完成 | 24/24 passed | 8 字段定义（+composite_col +sop）、主数据映射、Token 类型映射、通配维度 | `73fe576` |
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 40/40 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词三级兜底**（词典→记忆→交互）；无 LLM 调用；进程内去重缓存 | `9189a04` |
-| 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三类存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 30/30 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正三级存储、**模板指纹缓存**（get/save_template_rule）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
-| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式、**console_summary 控制台输出** | `fec7ffe` |
-| CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**批量模式自动跳过交互**、**主数据缺列 LLM 推断 + 置信度分流 + 列别名自动映射**、主数据列推断中文字段名→英文 canonical 翻译 | `fec7ffe` |
+| LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 31/31 passed | 7+1 步管线编排、PipelineState 状态传递、逐节点错误处理、LangGraph/纯顺序双模式、**chowbus 预处理层** + console_summary 控制台输出 | `192934f` |
+| CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**批量模式自动跳过交互**、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译 | `73fe576` |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
@@ -457,7 +457,7 @@ REPL 内支持以下斜杠指令：
 - 10 条：主数据中缺少规格「果蔬瓶」
 - 其余：糖度/温度个别不匹配
 
-### chowbus 模板
+### chowbus 模板（0611 真数据验证）
 
 | 指标 | 数值 |
 |------|------|
@@ -468,9 +468,18 @@ REPL 内支持以下斜杠指令：
 | API 调用 | 0 次（无需 Schema Analyzer） |
 | 耗时 | ~0.3s |
 
+**与正确答案对比（0611resultsdaan.xlsx）：**
+
+| 指标 | 数值 |
+|------|------|
+| 答案有 SOP 值的行 | 75 行 |
+| Agent 精确匹配 | **75 行 (100.0%)** |
+| Agent 漏填（答案有、Agent 无） | **0 行** |
+| Agent 多填（答案无、Agent 有） | 18 行（LOW_CONFIDENCE 兜底猜测） |
+
 **18 条低置信度原因：** 主数据中缺少温度「冰沙」或规格「大杯」（数据覆盖不全）
 
-> 结论：所有低置信度均为数据覆盖不全，非匹配引擎 bug。
+> 结论：**答案行 100% 精确匹配，无漏填、无错填。** 低置信度均为数据覆盖不全，非匹配引擎 bug。
 
 ### 控制台摘要报告（`fec7ffe`）
 - **格式**：控制台输出按产品分组的简洁表格，详细日志仅写入文件
