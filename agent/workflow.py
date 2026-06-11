@@ -10,6 +10,11 @@ LangGraph 工作流定义 — 编排完整 POS 模板映射管线。
 
 from typing import Any, Dict, List, Optional
 
+try:
+    from typing import NotRequired  # Python >= 3.11
+except ImportError:
+    from typing_extensions import NotRequired  # Python < 3.11
+
 import pandas as pd
 
 from agent.matching_engine import generate_console_summary, generate_report as me_generate_report
@@ -27,7 +32,102 @@ from excel_io.excel_writer import write_result
 
 # ── 工作流状态键 ────────────────────────────────────────────────
 
+try:
+    from typing import TypedDict  # Python >= 3.8
+except ImportError:
+    from typing_extensions import TypedDict
 
+
+class PipelineStateDict(TypedDict, total=False):
+    """TypedDict 版本的管线状态（所有字段可选，支持增量更新）。
+
+    total=False: 节点只需返回变化的字段，其余字段由 LangGraph 自动合并。
+    """
+
+    # ── 输入参数 ──
+    master_path: str
+    template_path: str
+    output_path: str
+    report_path: str
+    target_col: str
+    master_sheet: int
+    template_sheet: int
+
+    # ── 中间数据 ──
+    master_df: "pd.DataFrame"
+    template_df: "pd.DataFrame"
+    template_type: str
+    chowbus_rows: List[Dict[str, Any]]
+    schema_result: Dict[str, Any]
+    token_results: List[Dict[str, Any]]
+    master_canonical: List[Dict[str, Any]]
+    template_canonical: List[Dict[str, Any]]
+    validated_tokens: List[Dict[str, Any]]
+    match_results: List[Dict[str, Any]]
+    report: str
+    console_summary: str
+
+    # ── 错误信息 ──
+    error: str
+    error_step: str
+
+    # ── 统计 ──
+    api_call_count: int
+
+
+def make_pipeline_state(
+    master_path: str = "",
+    template_path: str = "",
+    output_path: str = "",
+    report_path: str = "",
+    target_col: str = "配料",
+    master_sheet: int = 0,
+    template_sheet: int = 0,
+) -> PipelineStateDict:
+    """创建 PipelineStateDict 并填充默认值。
+
+    Args:
+        master_path: 主数据表 Excel 路径。
+        template_path: POS 模板 Excel 路径。
+        output_path: 输出 Excel 路径。
+        report_path: 校验报告路径。
+        target_col: 目标列名。
+        master_sheet: 主数据表 Sheet 序号。
+        template_sheet: 模板表 Sheet 序号。
+
+    Returns:
+        初始化好的 PipelineStateDict。
+    """
+    return PipelineStateDict(
+        master_path=master_path,
+        template_path=template_path,
+        output_path=output_path,
+        report_path=report_path or output_path.replace(".xlsx", "_report.txt") if output_path else "",
+        target_col=target_col,
+        master_sheet=master_sheet,
+        template_sheet=template_sheet,
+        # 中间数据
+        master_df=None,
+        template_df=None,
+        template_type="standard",
+        chowbus_rows=None,
+        schema_result=None,
+        token_results=None,
+        master_canonical=None,
+        template_canonical=None,
+        validated_tokens=None,
+        match_results=None,
+        report="",
+        console_summary="",
+        # 错误信息
+        error=None,
+        error_step=None,
+        # 统计
+        api_call_count=0,
+    )
+
+
+# DEPRECATED: 迁移到 PipelineStateDict 后删除
 class PipelineState:
     """管线状态容器。每个节点读/写此对象上的属性。"""
 
