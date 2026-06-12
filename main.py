@@ -468,16 +468,16 @@ def run(args: Optional[list] = None) -> int:
                      "unrecognized_cols": missing_master},
                 )
 
-    # 批量模式：注入 Token Classifier 兜底回调，避免未知词交互阻塞
-    if _batch_mode:
-        from agent.token_classifier import set_prompt_hook as tc_set_prompt_hook
-        tc_set_prompt_hook(
-            lambda word, context, llm_suggestion: (
-                {"action": "add", "type": llm_suggestion}
-                if llm_suggestion
-                else {"action": "unknown"}
-            )
-        )
+    # 批量模式已禁用：始终走交互确认，确保未知词写入长期记忆
+    # if _batch_mode:
+    #     from agent.token_classifier import set_prompt_hook as tc_set_prompt_hook
+    #     tc_set_prompt_hook(
+    #         lambda word, context, llm_suggestion: (
+    #             {"action": "add", "type": llm_suggestion}
+    #             if llm_suggestion
+    #             else {"action": "unknown"}
+    #         )
+    #     )
 
     # 运行管线（read_master 内部会应用 column_aliases 自动重命名）
     t0 = time.time()
@@ -947,6 +947,6 @@ if __name__ == "__main__":
         from cli.repl import repl_loop
         repl_loop()
     else:
-        # CLI 批量模式：禁用所有交互提示
-        set_batch_mode(True)
+        # 批量模式已禁用：始终走交互确认，确保未知词写入长期记忆
+        # set_batch_mode(True)
         sys.exit(run())

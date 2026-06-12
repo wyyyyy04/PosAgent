@@ -612,10 +612,7 @@ def build_graph():
 
     # ── 编译 + checkpoint + interrupt ──
     checkpointer = MemorySaver(serde=_DataFrameSerde())
-    return graph.compile(
-        checkpointer=checkpointer,
-        interrupt_before=["human_review"],
-    )
+    return graph.compile(checkpointer=checkpointer)
 
 
 # ── 公开 API ────────────────────────────────────────────────────
@@ -677,23 +674,20 @@ def run_pipeline(
         config = {"configurable": {"thread_id": str(uuid.uuid4())}}
         result = app.invoke(state, config)
 
-        # 检查是否在 human_review 前挂起
-        snapshot = app.get_state(config)
-        if snapshot.next and "human_review" in snapshot.next:
-            # 拉取当前状态中的低置信度行
-            snap_state = snapshot.values
-            low_conf = snap_state.get("low_conf_rows", [])
-            master_fp = _compute_master_fingerprint(
-                str(snap_state.get("master_path", ""))
-            )
-
-            # 调用审核交互
-            from cli.human_review import run_review
-            review_result = run_review(low_conf, master_fp)
-
-            # 注入审核结果并恢复执行
-            app.update_state(config, {"human_review_result": review_result})
-            result = app.invoke(None, config)
+        # Human Review 已禁用：输出报告后直接结束
+        # （保留 interrupt/resume 代码，需要时取消注释即可恢复）
+        #
+        # snapshot = app.get_state(config)
+        # if snapshot.next and "human_review" in snapshot.next:
+        #     snap_state = snapshot.values
+        #     low_conf = snap_state.get("low_conf_rows", [])
+        #     master_fp = _compute_master_fingerprint(
+        #         str(snap_state.get("master_path", ""))
+        #     )
+        #     from cli.human_review import run_review
+        #     review_result = run_review(low_conf, master_fp)
+        #     app.update_state(config, {"human_review_result": review_result})
+        #     result = app.invoke(None, config)
 
         # 收集 API 调用统计
         from agent.schema_analyzer import get_api_call_count as _sa_count
@@ -717,20 +711,22 @@ def run_pipeline(
         if state.get("error") is not None:
             break
 
-    # Human Review：检查是否有低置信度行需要审核
-    if not state.get("error"):
-        low_conf_rows = [
-            r for r in state.get("match_results", [])
-            if r.get("confidence") == "LOW_CONFIDENCE"
-        ]
-        if low_conf_rows:
-            from cli.human_review import run_review
-            master_fp = _compute_master_fingerprint(
-                str(state.get("master_path", ""))
-            )
-            review_result = run_review(low_conf_rows, master_fp)
-            state["human_review_result"] = review_result
-            step_human_review(state)
+    # Human Review 已禁用：输出报告后直接结束
+    # （保留代码，需要时取消注释即可恢复）
+    #
+    # if not state.get("error"):
+    #     low_conf_rows = [
+    #         r for r in state.get("match_results", [])
+    #         if r.get("confidence") == "LOW_CONFIDENCE"
+    #     ]
+    #     if low_conf_rows:
+    #         from cli.human_review import run_review
+    #         master_fp = _compute_master_fingerprint(
+    #             str(state.get("master_path", ""))
+    #         )
+    #         review_result = run_review(low_conf_rows, master_fp)
+    #         state["human_review_result"] = review_result
+    #         step_human_review(state)
 
     # 输出
     if not state.get("error"):
