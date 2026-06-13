@@ -13,6 +13,11 @@ import sys
 import time
 from typing import Optional
 
+# Windows 终端默认 GBK，中文容易乱码。切换为 UTF-8 全局输出。
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
