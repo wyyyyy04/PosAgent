@@ -9,6 +9,11 @@ __pycache__/
 # Long-term memory (user-local, not in git)
 .pos_agent/
 
-# Test data
+# Test data / output
 *.xlsx
 !example*.xlsx
+*.txt
+!requirements.txt
+
+# Config file
+config.py
