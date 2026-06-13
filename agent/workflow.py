@@ -181,7 +181,7 @@ def step_preprocess(state: PipelineState) -> PipelineState:
         from agent.rule_engine import master_to_canonical
 
         # 注入静默钩子：UNKNOWN 不触发询问
-        tc_set_prompt_hook(lambda word, ctx: {"action": "skip"})
+        tc_set_prompt_hook(lambda word, ctx, llm: {"action": "skip"})
 
         # 对每行 composite_info 做 Token 分类
         for row in state["chowbus_rows"]:
