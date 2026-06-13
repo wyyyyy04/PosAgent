@@ -451,7 +451,7 @@ REPL 内支持以下斜杠指令：
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 51/51 passed | **条件路由**：`route_after_load`（error→write_output / chowbus→preprocess / standard→analyze_schema）、`route_after_match`（error→write_output / low_conf→human_review / high→write_output）；**checkpointer**：MemorySaver + _DataFrameSerde（DataFrame msgpack 序列化）；PipelineState(TypedDict, total=False)；LangGraph 默认启用；**Human Review 节点暂停调用**（代码保留，interrupt_before 已移除） | `d85baaa` |
 | Human Review | cli/human_review.py | ⏸️ 暂停 | 10/10 passed | 低置信度行交互式审核（接受/手动输入/本次跳过/永久跳过）、run_review_silent 批量模式；**长期记忆持久化**：`confirmed_mappings`；**暂停原因**：逐个确认低置信度行体验不佳，当前阶段输出报告即可 | `d85baaa` |
-| CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译；**批量模式已禁用**（始终走交互确认，确保未知词写入长期记忆） | `d85baaa` |
+| CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译；**批量模式已禁用**（始终走交互确认）；**Windows 终端 UTF-8 全局输出**（解决中文乱码） | `3aa23cf` |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
