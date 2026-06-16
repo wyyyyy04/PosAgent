@@ -580,6 +580,10 @@ def build_expand_parser() -> argparse.ArgumentParser:
         "--master-sheet", type=int, default=None,
         help="主数据表 Sheet 序号（覆盖 --sheet）",
     )
+    parser.add_argument(
+        "--header-row", type=int, default=2,
+        help="模板表头所在行号，1=第一行（默认 2，适配含分组表头的模板）",
+    )
     return parser
 
 
@@ -630,7 +634,7 @@ def run_expand(args: Optional[list] = None) -> int:
     # Step 3: 写入
     write_expanded_template(
         opts.template, opts.output, expanded_df,
-        header_row=1,
+        header_row=opts.header_row,
     )
 
     # 汇总统计
