@@ -1,0 +1,216 @@
+{
+  "summary": {
+    "total": 870,
+    "high": 775,
+    "low": 95,
+    "answered_total": 793,
+    "no_answer": 77,
+    "correct_high": 775,
+    "correct_low": 9,
+    "wrong_high": 0,
+    "wrong_low": 9,
+    "effective_accuracy_pct": 98.9,
+    "high_accuracy_pct": 97.7,
+    "elapsed_seconds": 3.8,
+    "api_calls": 1
+  },
+  "error_types": {
+    "SOP_mismatch": 9
+  },
+  "low_reasons": {
+    "product_only (score=100, unmatched=('size', 'temperature', 'sugar'))": 16,
+    "best_guess (score=40, unmatched=('temperature', 'sugar'))": 16,
+    "best_guess (score=40, unmatched=('size', 'temperature', 'sugar'))": 16,
+    "product_only (score=100, unmatched=('temperature', 'sugar'))": 14,
+    "product_only (score=85, unmatched=())": 8,
+    "product_only (score=100, unmatched=('size', 'temperature'))": 5,
+    "product_only (score=100, unmatched=('size', 'sugar'))": 4,
+    "product_only (score=100, unmatched=('temperature',))": 4,
+    "best_guess (score=40, unmatched=('temperature',))": 4,
+    "best_guess (score=40, unmatched=('size', 'temperature'))": 4,
+    "product_only (score=100, unmatched=('sugar',))": 3,
+    "product_only (score=100, unmatched=('size',))": 1
+  },
+  "errors": [
+    {
+      "row": 519,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "标准糖,少冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S5,IW-350,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "sugar",
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "temperature"
+      ]
+    },
+    {
+      "row": 520,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "七分糖,正常冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S4,IW-300,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "temperature",
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "sugar"
+      ]
+    },
+    {
+      "row": 521,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "七分糖,少冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S4,IW-350,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "temperature",
+        "sugar"
+      ]
+    },
+    {
+      "row": 522,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "五分糖,正常冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S3,IW-300,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "temperature",
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "sugar"
+      ]
+    },
+    {
+      "row": 523,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "五分糖,少冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S3,IW-350,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "temperature",
+        "sugar"
+      ]
+    },
+    {
+      "row": 524,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "三分糖,正常冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S2,IW-300,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "temperature",
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "sugar"
+      ]
+    },
+    {
+      "row": 525,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "三分糖,少冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,S2,IW-350,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "temperature",
+        "sugar"
+      ]
+    },
+    {
+      "row": 526,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "不另加糖,正常冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,IW-300,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "temperature",
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "sugar"
+      ]
+    },
+    {
+      "row": 527,
+      "product": "羽衣甘蓝纤体瓶",
+      "size": "果蔬瓶",
+      "combo": "不另加糖,少冰,茉莉绿茶",
+      "predicted": "TP1/2,T100,B25/100,S5,IW-300,IC(S),Stir",
+      "actual": "TP1/2,T100,B25/100,IW-350,IC(S),Stir",
+      "confidence": "LOW_CONFIDENCE",
+      "type": "SOP_mismatch",
+      "score": 100.0,
+      "matched": [
+        "milk_base(通配)",
+        "tea_base(通配)"
+      ],
+      "unmatched": [
+        "size",
+        "temperature",
+        "sugar"
+      ]
+    }
+  ]
+}

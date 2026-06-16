@@ -31,6 +31,15 @@ MASTER_WILDCARD_COLUMNS = ["奶底"]
 # 主数据表可选字段（存在则保留）
 MASTER_OPTIONAL_COLUMNS = ["全信息", "SOP"]
 
+# ── 选项规格主数据格式 ────────────────────────────────────────────
+
+# 选项规格主数据固定列（必须存在）
+OPTION_MASTER_FIXED_COLUMNS = ["主编码", "商品名称"]
+
+# 选项规格主数据维度（每个维度对应 3 列：推荐{dim}, 默认{dim}, {dim}）
+OPTION_MASTER_DIMENSIONS = ["糖度", "温度", "规格", "奶底", "茶底"]
+
+
 # canonical field → 主数据必要字段名 的逆向映射（供列别名匹配使用）
 CANONICAL_TO_MASTER_REQUIRED = {
     "product_name": "品名",

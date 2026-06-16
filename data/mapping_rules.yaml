@@ -1,0 +1,257 @@
+# PosAgent 模板映射规则
+# ========================
+# 从 agent/rule_engine.py、data/canonical_schema.py、data/token_dict.py、
+# agent/matching_engine.py、config.py 中提取，作为映射规则的声明式参考。
+#
+# 用途：
+#   - 新增模板映射规则时的参考基准
+#   - 未来可从 YAML 加载规则替代硬编码
+#
+# 更新日期：2026-06-16
+
+version: "1.0"
+description: "PosAgent 模板映射规则 — 所有模板字段统一转换为此内部标准结构"
+
+# ═══════════════════════════════════════════════════════════════════
+# 1. Canonical Schema（内部标准字段）
+# ═══════════════════════════════════════════════════════════════════
+
+canonical_schema:
+  # 所有 canonical 字段（含扩展字段和特殊字段）
+  fields:
+    - product_name   # 商品名称
+    - size           # 规格/杯型
+    - milk_base      # 奶底
+    - temperature    # 温度/做法
+    - sugar          # 糖度
+    - tea_base       # 茶底（扩展字段）
+    - composite_col  # 组合字段名（如"口味做法组合"，特殊字段）
+    - sop            # SOP 代码（目标值，特殊字段）
+
+  # 必要维度：匹配时这些字段必须有值，缺列直接报错
+  required_dimensions:
+    - size
+    - temperature
+    - sugar
+
+  # 通配维度：主数据中为空时可匹配任意值
+  wildcard_dimensions:
+    - milk_base
+    - tea_base
+
+# ═══════════════════════════════════════════════════════════════════
+# 2. 主数据表列映射（中文列名 → Canonical 字段）
+# ═══════════════════════════════════════════════════════════════════
+# 主数据表字段名固定为中文，不需要 LLM 识别
+# 来源: data/canonical_schema.py MASTER_COLUMN_MAP
+
+master_column_map:
+  品名: product_name
+  杯型: size
+  奶底: milk_base
+  做法: temperature
+  糖:   sugar
+
+# 主数据表 SOP 列的候选名称（按优先级查找）
+master_sop_candidates:
+  - SOP
+  - 配料
+  - SOP 代码
+  - 代码
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. Token 类型映射（中文类型名 → Canonical 字段）
+# ═══════════════════════════════════════════════════════════════════
+# 来源: data/canonical_schema.py TOKEN_TYPE_TO_FIELD
+
+token_type_mapping:
+  温度: temperature
+  糖度: sugar
+  奶底: milk_base
+  规格: size
+  茶底: tea_base
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. Token 词典（属性值 → 类型）
+# ═══════════════════════════════════════════════════════════════════
+# 词典为软约束：LLM Token Classifier 可识别词典外的值并标注 UNKNOWN_TOKEN
+# 来源: data/token_dict.py _RAW_TOKENS
+
+token_dictionary:
+  温度:
+    - 热
+    - 温热
+    - 正常冰
+    - 少冰
+    - 去冰
+    - 冰沙
+
+  糖度:
+    - 全糖
+    - 十二分糖
+    - 标准糖
+    - 七分糖
+    - 五分糖
+    - 三分糖
+    - 不另加糖
+    - 无糖
+
+  奶底:
+    - 牛奶
+    - 燕麦奶
+    - 厚乳
+    - 椰乳
+
+  规格:
+    - 大杯
+    - 中杯
+    - 小杯
+    - 五角瓶
+
+  茶底:
+    - 红茶
+    - 绿茶
+    - 乌龙茶
+    - 五角排红茶
+    - 五黄标准茶
+    - 茉莉绿茶  # 2026-06-05: testdata 口味做法组合中出现
+
+# 已知后缀模式（文档备忘，normalize_token 通过分隔符边界检测自动处理）
+known_suffixes:
+  - "|推荐"   # 主数据糖度列常见：七分糖|推荐
+  - "/新"     # 模板规格列偶尔出现：大杯/新
+
+# normalize_token 分隔符集合（用于子串边界检测和后缀切割）
+separators:
+  - "|"
+  - "/"
+  - " "
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. 匹配引擎配置
+# ═══════════════════════════════════════════════════════════════════
+# 来源: config.py MATCHING_CONFIG + agent/matching_engine.py 常量
+
+matching:
+  # 商品名匹配（RapidFuzz）
+  product_name_threshold: 90       # token_sort_ratio ≥ 此值视为高置信匹配
+  low_confidence_threshold: 80    # 低于此值直接 LOW_CONFIDENCE
+  scorer: token_sort_ratio
+
+  # Embedding 兜底（默认关闭）
+  embedding:
+    enabled: false
+    model: paraphrase-multilingual-MiniLM-L12-v2
+    top_k: 3
+    similarity_threshold: 0.85
+
+# 匹配类型枚举
+match_types:
+  exact:            "exact"             # 商品名 + 全属性精确匹配
+  attribute_match:  "attribute_match"   # 属性组合匹配
+  product_only:     "product_only"      # 仅商品名匹配（属性不匹配）
+  best_guess:       "best_guess"        # 兜底最佳猜测
+
+# 置信度枚举
+confidence_levels:
+  high:           "HIGH"
+  low_confidence: "LOW_CONFIDENCE"
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. 失败原因码及中文描述
+# ═══════════════════════════════════════════════════════════════════
+# 来源: agent/matching_engine.py _REASON_CN_MAP / _REASON_SUGGESTION_MAP
+
+failure_reasons:
+  PRODUCT_NOT_FOUND:
+    cn: "商品名称在主数据中未找到"
+    suggestion: "检查商品名称是否有错别字，或补充主数据表"
+
+  MILK_BASE_NOT_FOUND:
+    cn: "{extra}规格在主数据中缺失"
+    suggestion: "补充 {extra} 相关 SOP 到主数据表"
+
+  SIZE_NOT_FOUND:
+    cn: "规格在主数据中缺失"
+    suggestion: ""
+
+  TEMPERATURE_NOT_FOUND:
+    cn: "温度/做法在主数据中缺失"
+    suggestion: ""
+
+  SUGAR_NOT_FOUND:
+    cn: "糖度在主数据中缺失"
+    suggestion: ""
+
+  TEA_BASE_NOT_FOUND:
+    cn: "茶底在主数据中缺失"
+    suggestion: ""
+
+# ═══════════════════════════════════════════════════════════════════
+# 7. 模板预处理规则
+# ═══════════════════════════════════════════════════════════════════
+# 来源: agent/template_preprocessor.py
+
+template_preprocessing:
+  # 模板类型检测条件（chowbus 类型）
+  detection:
+    chowbus:
+      # 条件 1: 第一行至少有 3 个纯英文列名
+      min_english_headers: 3
+      # 条件 2: 第二行包含中文字符
+      row1_contains_chinese: true
+      # 条件 3: 必须存在 item_cn 列
+      required_columns:
+        - item_cn
+      # 条件 4: 必须存在至少一个 customization{N}_id 列
+      customization_pattern: "^customization\\d+_id$"
+
+  # chowbus 行收集规则
+  chowbus_row_collection:
+    # 从第 3 行开始读取（跳过英文表头 + 中文注释行）
+    data_start_row: 2
+    # 以 item_cn 列为锚点
+    anchor_column: item_cn
+    # 仅收集锚点右侧的中文值
+    scan_direction: right
+    # 过滤规则：纯英文、纯数字值跳过
+    skip_patterns:
+      - "^[a-zA-Z_][a-zA-Z0-9_]*$"   # 纯英文标识符
+      - "^\\d+$"                       # 纯数字
+    # 值清洗：去除 |推荐 等后缀标记
+    clean_suffix_markers: true
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. 属性匹配规则
+# ═══════════════════════════════════════════════════════════════════
+# 来源: agent/matching_engine.py _attributes_match()
+
+attribute_matching:
+  # 必要维度匹配：master 和 template 都必须有值且精确相等
+  required_rules:
+    - field: size
+      match: exact
+      miss_penalty: unmatched
+    - field: temperature
+      match: exact
+      miss_penalty: unmatched
+    - field: sugar
+      match: exact
+      miss_penalty: unmatched
+
+  # 通配维度匹配：master 为空时通配（跳过），master 有值时精确匹配
+  wildcard_rules:
+    - field: milk_base
+      master_empty: wildcard     # master 为空 → 通配任意 template 值
+      master_has_value: exact    # master 有值 → 必须精确匹配
+    - field: tea_base
+      master_empty: wildcard
+      master_has_value: exact
+
+  # LOW_CONFIDENCE 失败原因推断优先级（从高到低）
+  failure_reason_priority:
+    - milk_base
+    - size
+    - temperature
+    - sugar
+    - tea_base
