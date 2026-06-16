@@ -353,3 +353,35 @@ option_expansion:
     - "不需要 Matching Engine：不做主数据与模板的匹配"
     - "不需要 LangGraph 工作流：纯顺序执行，无条件路由"
     - "不使用 LLM：100% 规则驱动，API 调用 = 0"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 10. LLM Tool 注册表（agent/tools.py + agent/sandbox.py）
+# ═══════════════════════════════════════════════════════════════════
+
+llm_tool_registry:
+  description: >
+    将规则函数注册为 LLM 可调用的 Tool，供 LangGraph create_react_agent 消费。
+    pipeline 类 Tool 禁止 LLM 自行实现；supplementary 类 Tool 供辅助操作。
+
+  tools:
+    - name: run_sop_matching
+      category: pipeline
+      handler: agent.orchestration.run_sop_pipeline
+      guardrail: "LLM 必须调用此 tool 执行匹配，禁止自行生成匹配代码"
+
+    - name: run_option_expansion
+      category: pipeline
+      handler: agent.orchestration.run_expand_pipeline
+      guardrail: "LLM 必须调用此 tool 执行展开"
+
+    - name: execute_python
+      category: supplementary
+      handler: agent.sandbox.execute
+      guardrail: "LLM 可生成 Python 代码增删改查数据，禁止生成匹配/填充逻辑"
+      sandbox_allowed: [pandas, openpyxl, numpy, json, csv, re, collections]
+
+    - name: query_token_dict
+      category: supplementary
+      handler: agent.tools.query_token_dict
+      guardrail: "只读操作，可安全调用"
