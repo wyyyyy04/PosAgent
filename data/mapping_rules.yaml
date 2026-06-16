@@ -255,3 +255,101 @@ attribute_matching:
     - temperature
     - sugar
     - tea_base
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 9. 选项规格模板展开规则（Option Specification Template Expander）
+# ═══════════════════════════════════════════════════════════════════
+# 将主数据表中的选项规格数据展开为空白选项模板的行。
+# 来源: agent/option_expander.py
+
+option_expansion:
+  description: >
+    将包含选项规格定义的主数据表展开为选项模板的明细行。
+    每个主数据行按 5 个维度（糖度/温度/规格/奶底/茶底）展开，
+    每个维度的每个选项值生成一行模板数据。
+    纯规则引擎，不调用 LLM。
+
+  # ── 主数据表列定义 ──
+
+  master_columns:
+    # 固定列（必须存在）
+    fixed:
+      - name: 主编码
+        canonical: product_code
+        required: true
+        description: 商品唯一编码
+
+      - name: 商品名称
+        canonical: product_name
+        required: true
+        description: 商品名称
+
+    # 展开维度（按遍历顺序）
+    dimensions:
+      - 糖度
+      - 温度
+      - 规格
+      - 奶底
+      - 茶底
+
+    # 每个维度下的 3 种列模式
+    dimension_column_patterns:
+      - prefix: "推荐"
+        example: 推荐糖度
+        description: 推荐值（单个，可为空）
+      - prefix: "默认"
+        example: 默认糖度
+        description: 默认值（单个，可为空）
+      - prefix: ""
+        example: 糖度
+        description: 选项值列表（；分隔）
+
+  # ── 模板输出列定义 ──
+
+  template_columns:
+    - 商品编码       # ← master.主编码
+    - 商品名称       # ← master.商品名称
+    - 口味做法组名   # ← 维度名（糖度/温度/规格/奶底/茶底）
+    - 选项名称       # ← 列表中的单个值
+    - 最少必选       # ← 固定为 1（严格整数）
+    - 最多可选       # ← 固定为 1（严格整数）
+    - 推荐项         # ← "是" 或 "否"
+    - 默认项         # ← "是" 或 "否"
+
+  # ── 展开逻辑 ──
+
+  expansion:
+    dimension_list_separator: "；"
+    dimension_order:
+      - 糖度
+      - 温度
+      - 规格
+      - 奶底
+      - 茶底
+
+    recommendation_rule: >
+      选项值 == 推荐{dim} → 推荐项 = "是"，否则 "否"
+      选项值 == 默认{dim} → 默认项 = "是"，否则 "否"
+      推荐/默认值为空时，全部填"否"
+      同一值可以同时是推荐项和默认项
+
+    deduplicate: true
+    skip_empty_values: true
+
+    empty_dimension_behavior: skip
+    all_dimensions_empty_behavior: skip
+
+  constants:
+    最少必选: 1
+    最多可选: 1
+    yes_value: "是"
+    no_value: "否"
+
+  differences_from_sop_pipeline:
+    - "不需要 Schema Analyzer：主数据列名固定，不需要 LLM 分析"
+    - "不需要 Token Classifier：没有组合字段需要解析"
+    - "不需要 Rule Engine：不需要 Canonical Schema 标准化"
+    - "不需要 Matching Engine：不做主数据与模板的匹配"
+    - "不需要 LangGraph 工作流：纯顺序执行，无条件路由"
+    - "不使用 LLM：100% 规则驱动，API 调用 = 0"

@@ -1,4 +1,4 @@
-# POS Template Mapping Agent
+﻿# POS Template Mapping Agent
 
 > 面向餐饮/奶茶行业的 POS 模板自动映射工具。上传主数据表和 POS 模板，一条 CLI 指令完成 SOP 字段自动填充。
 
@@ -452,6 +452,7 @@ REPL 内支持以下斜杠指令：
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 51/51 passed | **条件路由**：`route_after_load`（error→write_output / chowbus→preprocess / standard→analyze_schema）、`route_after_match`（error→write_output / low_conf→human_review / high→write_output）；**checkpointer**：MemorySaver + _DataFrameSerde（DataFrame msgpack 序列化）；PipelineState(TypedDict, total=False)；LangGraph 默认启用；**Human Review 节点暂停调用**（代码保留）；**修复**：chowbus 预处理 lambda 适配 hook 三参数协议 | `db59cb5` |
 | Human Review | cli/human_review.py | ⏸️ 暂停 | 10/10 passed | 低置信度行交互式审核（接受/手动输入/本次跳过/永久跳过）、run_review_silent 批量模式；**长期记忆持久化**：`confirmed_mappings`；**暂停原因**：逐个确认低置信度行体验不佳，当前阶段输出报告即可 | `d85baaa` |
 | CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译；**批量模式已禁用**（始终走交互确认）；**Windows 终端 UTF-8 全局输出**（解决中文乱码） | `3aa23cf` |
+| **选项规格展开器** | agent/option_expander.py, excel_io/ | ✅ 已完成 | expander: 49/49, reader: 33/33, writer: 30/30 | **全新独立管线**：主数据选项规格 → 模板展开；5 维度 × 中文分号分隔列表；固定列名、纯规则引擎、零 LLM；python main.py expand 子命令 | 176b846 |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
