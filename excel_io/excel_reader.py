@@ -197,6 +197,49 @@ def read_template_raw(filepath: str, sheet_name=0) -> "pd.DataFrame":
     return df
 
 
+def read_option_master(filepath: str, sheet_name=0) -> pd.DataFrame:
+    """读取选项规格主数据表，校验必要字段。
+
+    选项规格主数据格式（固定列）：
+      固定列: 主编码, 商品名称
+      维度列（每维度 3 列）: 推荐{dim}, 默认{dim}, {dim}
+      其中 dim ∈ {糖度, 温度, 规格, 奶底, 茶底}
+
+    必要字段（缺一报错）: 主编码, 商品名称
+    可选字段（缺失时自动注入空列）: 推荐{dim}, 默认{dim}, {dim}
+
+    Args:
+        filepath: 选项规格主数据表 Excel 路径。
+        sheet_name: 工作表名或索引。
+
+    Returns:
+        pd.DataFrame，所有预期列均已就位。
+
+    Raises:
+        ValueError: 缺少「主编码」或「商品名称」列。
+    """
+    df = read_excel(filepath, sheet_name=sheet_name)
+
+    # 验证固定必要列
+    missing_fixed = [c for c in OPTION_MASTER_FIXED_COLUMNS if c not in df.columns]
+    if missing_fixed:
+        raise ValueError(
+            f"选项规格主数据表缺少必要列: {missing_fixed}\n"
+            f"当前列名: {list(df.columns)}"
+        )
+
+    # 软校验：维度列表列缺失时警告，推荐/默认列缺失时自动注入空列
+    for dim in OPTION_MASTER_DIMENSIONS:
+        if dim not in df.columns:
+            print(f"[WARNING] 主数据表缺少「{dim}」列，该维度将被跳过")
+        for prefix in ["推荐", "默认"]:
+            col = f"{prefix}{dim}"
+            if col not in df.columns:
+                df[col] = None
+
+    return df
+
+
 # ── 自测 ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -224,6 +267,10 @@ if __name__ == "__main__":
     template_path = os.path.join(tmpdir, "template_test.xlsx")
     empty_path = os.path.join(tmpdir, "empty.xlsx")
     multi_sheet_path = os.path.join(tmpdir, "multi_sheet.xlsx")
+    opt_master_path = os.path.join(tmpdir, "opt_master.xlsx")
+    opt_no_code_path = os.path.join(tmpdir, "opt_no_code.xlsx")
+    opt_minimal_path = os.path.join(tmpdir, "opt_minimal.xlsx")
+    opt_no_dim_path = os.path.join(tmpdir, "opt_no_dim.xlsx")
 
     pd.DataFrame({
         "品名": ["浅浅清茶", "浅浅清茶"],
@@ -393,6 +440,69 @@ if __name__ == "__main__":
             check("做法" in str(e), f"报错信息包含「做法」（实际: {e}）")
         print()
 
+        # ── 12. read_option_master 正常读取 ──
+        print("12. read_option_master 正常读取")
+        pd.DataFrame({
+            "主编码": ["A001", "A002"],
+            "商品名称": ["茉莉绿茶", "珍珠奶茶"],
+            "推荐糖度": ["七分糖", "全糖"],
+            "默认糖度": ["五分糖", "标准糖"],
+            "糖度": ["七分糖；五分糖；三分糖", "全糖；标准糖"],
+            "推荐温度": ["正常冰", "热"],
+            "默认温度": ["少冰", "热"],
+            "温度": ["正常冰；少冰；去冰", "热；正常冰"],
+            "推荐规格": ["中杯", "大杯"],
+            "默认规格": ["中杯", "大杯"],
+            "规格": ["中杯；大杯", "大杯；中杯"],
+            "推荐奶底": ["牛奶", ""],
+            "默认奶底": ["燕麦奶", ""],
+            "奶底": ["牛奶；燕麦奶", ""],
+            "推荐茶底": ["绿茶", ""],
+            "默认茶底": ["绿茶", ""],
+            "茶底": ["绿茶；乌龙茶", ""],
+        }).to_excel(opt_master_path, index=False)
+        om = read_option_master(opt_master_path)
+        check(len(om) == 2, f"读取 2 行（实际 {len(om)}）")
+        check("主编码" in om.columns, "包含「主编码」列")
+        check(om.iloc[0]["主编码"] == "A001", "第一行主编码 = A001")
+        check(om.iloc[0]["糖度"] == "七分糖；五分糖；三分糖", "糖度列正确")
+        print()
+
+        # ── 13. read_option_master 缺少主编码 → ValueError ──
+        print("13. read_option_master 缺少主编码 → ValueError")
+        pd.DataFrame({"商品名称": ["测试"]}).to_excel(opt_no_code_path, index=False)
+        try:
+            read_option_master(opt_no_code_path)
+            check(False, "缺少主编码应抛 ValueError")
+        except ValueError as e:
+            check("主编码" in str(e), f"报错含「主编码」（实际: {e}）")
+        print()
+
+        # ── 14. read_option_master 缺少维度列 → 注入空列 ──
+        print("14. read_option_master 缺少维度列 → 自动注入空列")
+        pd.DataFrame({
+            "主编码": ["A001"],
+            "商品名称": ["测试"],
+            "糖度": ["七分糖"],
+        }).to_excel(opt_minimal_path, index=False)
+        om_min = read_option_master(opt_minimal_path)
+        check("推荐糖度" in om_min.columns, "「推荐糖度」被自动注入")
+        check("默认温度" in om_min.columns, "「默认温度」被自动注入")
+        check("规格" not in om_min.columns, "「规格」列不存在（维度列表列不注入，仅警告）")
+        check(om_min["推荐糖度"].isna().all(), "注入的推荐糖度列为 None")
+        print()
+
+        # ── 15. read_option_master 缺少维度列表列 → 警告 ──
+        print("15. read_option_master 缺少维度列表列 → 警告（不报错）")
+        pd.DataFrame({
+            "主编码": ["A001"],
+            "商品名称": ["测试"],
+        }).to_excel(opt_no_dim_path, index=False)
+        om_no_dim = read_option_master(opt_no_dim_path)
+        check(len(om_no_dim) == 1, "仍然正常读取 1 行")
+        check("主编码" in om_no_dim.columns, "主编码列正常")
+        print()
+
     finally:
         for f in [master_path, template_path, empty_path, multi_sheet_path,
                   os.path.join(tmpdir, "bad_master.xlsx"),
@@ -400,7 +510,8 @@ if __name__ == "__main__":
                   os.path.join(tmpdir, "no_milk_master.xlsx"),
                   os.path.join(tmpdir, "bad_required.xlsx"),
                   os.path.join(tmpdir, "alias_master.xlsx"),
-                  os.path.join(tmpdir, "soft_master.xlsx")]:
+                  os.path.join(tmpdir, "soft_master.xlsx"),
+                  opt_master_path, opt_no_code_path, opt_minimal_path, opt_no_dim_path]:
             if os.path.exists(f):
                 os.remove(f)
         os.rmdir(tmpdir)
