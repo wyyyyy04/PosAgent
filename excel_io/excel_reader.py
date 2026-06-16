@@ -39,6 +39,17 @@ OPTION_MASTER_FIXED_COLUMNS = ["主编码", "商品名称"]
 # 选项规格主数据维度（每个维度对应 3 列：推荐{dim}, 默认{dim}, {dim}）
 OPTION_MASTER_DIMENSIONS = ["糖度", "温度", "规格", "奶底", "茶底"]
 
+# 列名别名：实际数据中常见的异名列 → 标准列名
+OPTION_MASTER_COLUMN_ALIASES = {
+    "产品名称（中文）": "商品名称",
+    "产品名称(中文)": "商品名称",
+    "产品名称": "商品名称",
+    "推荐糖": "推荐糖度",
+    "默认糖": "默认糖度",
+    "推荐甜度": "推荐糖度",
+    "默认甜度": "默认糖度",
+}
+
 
 # canonical field → 主数据必要字段名 的逆向映射（供列别名匹配使用）
 CANONICAL_TO_MASTER_REQUIRED = {
@@ -219,6 +230,14 @@ def read_option_master(filepath: str, sheet_name=0) -> pd.DataFrame:
         ValueError: 缺少「主编码」或「商品名称」列。
     """
     df = read_excel(filepath, sheet_name=sheet_name)
+
+    # ── Step 0: 应用列名别名（自动重命名异名列）──
+    for col in list(df.columns):
+        if col in OPTION_MASTER_COLUMN_ALIASES:
+            target = OPTION_MASTER_COLUMN_ALIASES[col]
+            if target not in df.columns:
+                df.rename(columns={col: target}, inplace=True)
+                print(f"[INFO] 列名别名: 「{col}」→「{target}」")
 
     # 验证固定必要列
     missing_fixed = [c for c in OPTION_MASTER_FIXED_COLUMNS if c not in df.columns]

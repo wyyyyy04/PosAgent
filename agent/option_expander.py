@@ -45,9 +45,10 @@ def _empty(val: Any) -> bool:
 
 
 def _parse_dimension_list(raw_value: Any) -> List[str]:
-    """将分号分隔的维度列表解析为去重、去空白的值列表。
+    """将分隔的维度列表解析为去重、去空白的值列表。
 
-    分隔符：中文分号「；」，不处理 ASCII 分号「;」以避免误拆。
+    分隔符：中文分号「；」和 ASCII 分号「;」均支持。
+    同时处理行尾多余的分号和逗号分隔。
 
     Args:
         raw_value: 单元格原始值（字符串 / NaN / None）。
@@ -62,15 +63,31 @@ def _parse_dimension_list(raw_value: Any) -> List[str]:
     if not s:
         return []
 
-    # 用中文分号拆分
-    parts = s.split("；")
+    # 统一处理：先尝试中文分号，再尝试 ASCII 分号
+    # 检测哪种分隔符占主导
+    if "；" in s:
+        parts = s.split("；")
+    elif ";" in s:
+        parts = s.split(";")
+    elif "，" in s:
+        parts = s.split("，")
+    elif "," in s:
+        parts = s.split(",")
+    else:
+        # 单值
+        PLACEHOLDERS_SINGLE = {"-", "—", "无", "/", "\\"}
+        cleaned = s.strip()
+        if cleaned and cleaned not in PLACEHOLDERS_SINGLE:
+            return [cleaned]
+        return []
 
-    # 去空白、去空串、去重（保持首次出现顺序）
+    # 去空白、去空串、去重、过滤占位符（保持首次出现顺序）
+    PLACEHOLDERS = {"-", "—", "无", "/", "\\"}
     seen = set()
     result = []
     for p in parts:
         cleaned = p.strip()
-        if cleaned and cleaned not in seen:
+        if cleaned and cleaned not in seen and cleaned not in PLACEHOLDERS:
             seen.add(cleaned)
             result.append(cleaned)
 
@@ -126,8 +143,16 @@ def expand_master_to_options(master_df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
 
+    # 按主编码去重：同一产品可能有多行（如不同规格变体），
+    # 保留第一行（通常含完整的推荐/默认值），跳过后续重复行。
+    seen_codes = set()
+
     for _, mrow in master_df.iterrows():
         product_code = str(mrow["主编码"]).strip() if not _empty(mrow.get("主编码")) else ""
+        if product_code in seen_codes:
+            continue
+        seen_codes.add(product_code)
+
         product_name = str(mrow["商品名称"]).strip() if not _empty(mrow.get("商品名称")) else ""
 
         if not product_code and not product_name:
@@ -448,11 +473,14 @@ if __name__ == "__main__":
           f"列顺序正确（实际 {list(result.columns)}）")
     print()
 
-    # ── 19. 含 ASCII 分号的值不被误拆 ──
-    print("19. ASCII 分号「;」不被误拆")
+    # ── 19. ASCII 分号「;」和中文分号「；」均支持拆分 ──
+    print("19. ASCII 分号和中文分号均支持拆分")
     vals_semicolon = _parse_dimension_list("七分糖;五分糖;三分糖")
-    check(vals_semicolon == ["七分糖;五分糖;三分糖"],
-          f"ASCII 分号不被拆分（实际 {vals_semicolon}）")
+    check(vals_semicolon == ["七分糖", "五分糖", "三分糖"],
+          f"ASCII 分号被正确拆分（实际 {vals_semicolon}）")
+    vals_cn = _parse_dimension_list("正常冰；少冰；去冰")
+    check(vals_cn == ["正常冰", "少冰", "去冰"],
+          f"中文分号被正确拆分（实际 {vals_cn}）")
     print()
 
     # ── 汇总 ──

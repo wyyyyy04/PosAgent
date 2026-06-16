@@ -170,8 +170,17 @@ def write_expanded_template(
 
     for col in range(1, max_col + 1):
         val = ws.cell(row=header_row, column=col).value
-        if val and str(val).strip() in OPTION_TEMPLATE_COLUMNS:
-            col_map[str(val).strip()] = col
+        if val:
+            cleaned = str(val).strip()
+            # 去除 * 后缀（真实模板常见：商品编码* → 商品编码）
+            if cleaned.endswith("*"):
+                cleaned_no_star = cleaned[:-1]
+            else:
+                cleaned_no_star = cleaned
+            if cleaned in OPTION_TEMPLATE_COLUMNS:
+                col_map[cleaned] = col
+            elif cleaned_no_star in OPTION_TEMPLATE_COLUMNS:
+                col_map[cleaned_no_star] = col
 
     # 缺失的列头追加到末尾
     next_col = max_col + 1
