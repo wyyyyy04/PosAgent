@@ -541,9 +541,128 @@ def run(args: Optional[list] = None) -> int:
     return 0
 
 
+# ═══════════════════════════════════════════════════════════════════
+# expand 子命令 — 选项规格模板展开器
+# ═══════════════════════════════════════════════════════════════════
+
+def build_expand_parser() -> argparse.ArgumentParser:
+    """构建 expand 子命令的参数解析器。"""
+    parser = argparse.ArgumentParser(
+        prog="python main.py expand",
+        description="选项规格模板展开器 — 将主数据表的选项值展开为空白模板行",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python main.py expand -m 选项主数据.xlsx -t 选项模板.xlsx -o 输出.xlsx
+        """,
+    )
+    parser.add_argument(
+        "-m", "--master", required=True,
+        help="选项规格主数据表 Excel 路径（须含：主编码/商品名称/推荐{dim}/默认{dim}/{dim}）",
+    )
+    parser.add_argument(
+        "-t", "--template", required=True,
+        help="空白选项模板 Excel 路径（含表头，无数据行）",
+    )
+    parser.add_argument(
+        "-o", "--output", required=True,
+        help="输出 Excel 文件路径",
+    )
+    parser.add_argument(
+        "--sheet", type=int, default=0,
+        help="Sheet 序号，主数据和模板共用（默认 0）",
+    )
+    parser.add_argument(
+        "--template-sheet", type=int, default=None,
+        help="模板表 Sheet 序号（覆盖 --sheet）",
+    )
+    parser.add_argument(
+        "--master-sheet", type=int, default=None,
+        help="主数据表 Sheet 序号（覆盖 --sheet）",
+    )
+    return parser
+
+
+def run_expand(args: Optional[list] = None) -> int:
+    """执行选项规格模板展开管线。
+
+    Args:
+        args: 命令行参数列表，None 时使用 sys.argv[2:]（跳过 "expand" 子命令名）。
+
+    Returns:
+        exit code: 0=成功, 1=失败
+    """
+    if args is None:
+        args = sys.argv[2:]
+
+    parser = build_expand_parser()
+    opts = parser.parse_args(args)
+
+    master_sheet = opts.master_sheet if opts.master_sheet is not None else opts.sheet
+    template_sheet = opts.template_sheet if opts.template_sheet is not None else opts.sheet
+
+    # 验证输入文件
+    try:
+        _validate_file(opts.master, "选项主数据表")
+        _validate_file(opts.template, "选项模板表")
+    except CLIError as e:
+        print(f"[ERROR] {e}")
+        return 1
+
+    from excel_io.excel_reader import read_option_master
+    from excel_io.excel_writer import write_expanded_template
+    from agent.option_expander import expand_master_to_options, DIMENSIONS
+
+    print("=" * 56)
+    print("  Option Specification Template Expander")
+    print("=" * 56)
+    print(f"  主数据表: {opts.master} (Sheet {master_sheet})")
+    print(f"  模板表:   {opts.template} (Sheet {template_sheet})")
+    print(f"  输出:     {opts.output}")
+    print("-" * 56)
+
+    # Step 1: 读取主数据
+    master_df = read_option_master(opts.master, sheet_name=master_sheet)
+
+    # Step 2: 展开
+    expanded_df = expand_master_to_options(master_df)
+
+    # Step 3: 写入
+    write_expanded_template(
+        opts.template, opts.output, expanded_df,
+        header_row=1,
+    )
+
+    # 汇总统计
+    print(f"\n[OK] 展开完成!")
+    print(f"  主数据行数: {len(master_df)}")
+    print(f"  生成模板行数: {len(expanded_df)}")
+
+    # 维度分布
+    if not expanded_df.empty:
+        dim_counts = expanded_df["口味做法组名"].value_counts()
+        dim_parts = []
+        for dim in DIMENSIONS:
+            count = int(dim_counts.get(dim, 0))
+            if count == 0:
+                dim_parts.append(f"{dim}=0(无数据)")
+            else:
+                dim_parts.append(f"{dim}={count}")
+        print(f"  维度分布: {', '.join(dim_parts)}")
+    else:
+        print("  维度分布: 无数据")
+
+    print(f"\n  输出文件: {opts.output}")
+    return 0
+
+
 # ── 入口 ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # expand 子命令路由
+    if len(sys.argv) > 1 and sys.argv[1] == "expand":
+        sys.exit(run_expand(sys.argv[2:]))
+
     # 自测模式：传入 --self-test 标志运行自测
     if "--self-test" in sys.argv:
         # 移除 --self-test 标志，运行自测
