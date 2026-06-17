@@ -78,56 +78,34 @@ def get_tool_by_name(name: str) -> ToolDef:
 @register(
     name="run_sop_matching",
     description=(
-        "将主数据表的 SOP 代码自动匹配并填充到 POS 模板。"
-        "当用户说「匹配」「做映射」「填充 SOP」「跑管线」时必须调用此工具。"
-        "禁止自行生成匹配逻辑——任何匹配操作都必须通过此工具完成。"
+        "执行 SOP 匹配管线——将主数据表的 SOP 代码映射填充到 POS 模板。"
+        "判断标准：用户需要「匹配」或「填充」两个 Excel 之间的对应关系。"
+        "调用前你必须先通过 ask_user 确认列映射，禁止自行猜测列名。"
+        "流程: read_excel_info 分析两张表 → ask_user 确认列映射 → run_sop_matching"
     ),
     parameters={
-        "master_path": {
-            "type": "string",
-            "description": "主数据表 Excel 文件路径（须含品名/杯型/做法/糖/SOP 等列）",
-        },
-        "template_path": {
-            "type": "string",
-            "description": "POS 模板 Excel 文件路径",
-        },
-        "output_path": {
-            "type": "string",
-            "description": "输出 Excel 文件路径",
-        },
-        "target_col": {
-            "type": "string",
-            "description": "模板中需要填充 SOP 的目标列名，默认「配料」",
-        },
-        "report_path": {
-            "type": "string",
-            "description": "校验报告输出路径（可选，默认 output_path 同目录）",
+        "master_path": {"type": "string", "description": "主数据表 Excel 文件路径"},
+        "template_path": {"type": "string", "description": "POS 模板 Excel 文件路径"},
+        "output_path": {"type": "string", "description": "输出 Excel 文件路径"},
+        "target_col": {"type": "string", "description": "模板中要填充的目标列名，默认「配料」"},
+        "column_mapping": {
+            "type": "object",
+            "description": "主数据列→标准字段的映射，如 {'温度':'做法', '产品名称':'品名'}。不确定时通过 ask_user 确认。",
         },
     },
     category="pipeline",
 )
 def run_sop_matching(
-    master_path: str,
-    template_path: str,
-    output_path: str,
-    target_col: str = "配料",
-    report_path: str = "",
+    master_path: str, template_path: str, output_path: str,
+    target_col: str = "配料", column_mapping: dict = None,
 ) -> dict:
-    """执行 SOP 匹配管线。"""
-    import sys
-    from agent.orchestration import run_sop_pipeline
-
-    args = [
-        "--master", master_path,
-        "--template", template_path,
-        "--output", output_path,
-        "--target-col", target_col,
-    ]
-    if report_path:
-        args.extend(["--report", report_path])
-
-    exit_code = run_sop_pipeline(args)
-    return {"exit_code": exit_code, "output_path": output_path}
+    """执行 SOP 匹配管线（Agent 调用入口）。"""
+    from agent.orchestration import run_sop_pipeline_kwargs
+    return run_sop_pipeline_kwargs(
+        master_path=master_path, template_path=template_path,
+        output_path=output_path, target_col=target_col,
+        column_mapping=column_mapping,
+    )
 
 
 @register(
@@ -154,22 +132,71 @@ def run_sop_matching(
     category="pipeline",
 )
 def run_option_expansion(
-    master_path: str,
-    template_path: str,
-    output_path: str,
+    master_path: str, template_path: str, output_path: str,
 ) -> dict:
     """执行选项规格展开管线。"""
-    import sys
     from agent.orchestration import run_expand_pipeline
+    exit_code = run_expand_pipeline([
+        "--master", master_path, "--template", template_path, "--output", output_path,
+    ])
+    return {"ok": exit_code == 0, "output_path": output_path, "exit_code": exit_code}
 
-    args = [
-        "--master", master_path,
-        "--template", template_path,
-        "--output", output_path,
-    ]
 
-    exit_code = run_expand_pipeline(args)
-    return {"exit_code": exit_code, "output_path": output_path}
+# ═══════════════════════════════════════════════════════════════════
+# ask_user — Agent 规划落地锚点
+# ═══════════════════════════════════════════════════════════════════
+
+@register(
+    name="ask_user",
+    description=(
+        "当对列语义、用户意图或操作确认不确定时，必须调用此工具。"
+        "不要猜测列的含义、不要假设用户的意图——不确定就问。"
+        "典型场景：列名含糊（如「自定义字段A」）、用户指令有歧义、写入前确认。"
+    ),
+    parameters={
+        "question": {"type": "string", "description": "向用户提出的问题"},
+    },
+    category="interactive",
+)
+def ask_user(question: str) -> str:
+    """向用户提问并获取回答。"""
+    return input(f"\nAgent: {question}\n你: ")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# read_excel_info — Schema 分析入口
+# ═══════════════════════════════════════════════════════════════════
+
+@register(
+    name="read_excel_info",
+    description=(
+        "读取 Excel 文件结构——列名、行数、每列前3行样例值和空值数量。"
+        "在操作任何 Excel 文件前必须先调用此工具了解其结构，禁止猜测列名。"
+    ),
+    parameters={
+        "filepath": {"type": "string", "description": "Excel 文件路径"},
+        "sheet_name": {"type": "integer", "description": "Sheet 序号，默认 0"},
+    },
+    category="schema",
+)
+def read_excel_info(filepath: str, sheet_name: int = 0) -> dict:
+    """读取 Excel 结构信息。"""
+    import pandas as pd
+    try:
+        df = pd.read_excel(filepath, sheet_name=sheet_name)
+        return {
+            "filepath": filepath,
+            "columns": list(df.columns),
+            "row_count": len(df),
+            "sample_values": {
+                str(c): [str(v) for v in df[c].dropna().head(3).tolist()]
+                for c in df.columns
+            },
+            "null_counts": {str(c): int(df[c].isna().sum()) for c in df.columns},
+            "dtypes": {str(c): str(df[c].dtype) for c in df.columns},
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @register(

@@ -414,6 +414,75 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
     return 0
 
 
+def run_sop_pipeline_kwargs(
+    master_path: str,
+    template_path: str,
+    output_path: str,
+    target_col: str = "配料",
+    report_path: str = "",
+    column_mapping: Optional[dict] = None,
+) -> dict:
+    """Agent 直接调用入口 — 接受 keyword args，返回结构化结果。
+
+    与 run_sop_pipeline 的区别：不走 argparse，直接调用 workflow。
+    column_mapping 允许 Agent 传入动态列映射，适配任意列名的模板。
+
+    Args:
+        master_path: 主数据表路径。
+        template_path: 模板表路径。
+        output_path: 输出路径。
+        target_col: 目标填充列名。
+        report_path: 报告路径（可选）。
+        column_mapping: 列映射 dict，如 {'温度':'做法', '产品名称':'品名'}。
+
+    Returns:
+        {"ok": bool, "total_rows": int, "high_conf": int, "low_conf": int,
+         "report": str, "api_calls": int, "elapsed": float, "error": str}
+    """
+    import time
+
+    # 注入列映射到 column_aliases 记忆（Agent 分析 schema 后传入）
+    if column_mapping:
+        from data.memory import add_column_alias
+        for col_name, canonical in column_mapping.items():
+            add_column_alias(str(col_name), str(canonical))
+
+    from agent.workflow import run_pipeline
+
+    t0 = time.time()
+    try:
+        state = run_pipeline(
+            master_path=master_path,
+            template_path=template_path,
+            output_path=output_path,
+            report_path=report_path or output_path.replace(".xlsx", "_report.txt"),
+            target_col=target_col,
+        )
+        elapsed = time.time() - t0
+
+        if state.get("error"):
+            return {
+                "ok": False,
+                "error": state["error"],
+                "error_step": state.get("error_step", ""),
+                "elapsed": elapsed,
+            }
+
+        results = state.get("match_results", [])
+        return {
+            "ok": True,
+            "total_rows": len(results),
+            "high_conf": sum(1 for r in results if r.get("confidence") == "HIGH"),
+            "low_conf": sum(1 for r in results if r.get("confidence") == "LOW_CONFIDENCE"),
+            "report": state.get("console_summary", ""),
+            "api_calls": state.get("api_call_count", 0),
+            "elapsed": elapsed,
+            "output_path": output_path,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "elapsed": time.time() - t0}
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 选项展开管线
 # ═══════════════════════════════════════════════════════════════════
