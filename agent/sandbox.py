@@ -17,8 +17,10 @@ from typing import Any, Dict, Optional
 
 # ── 白名单 ────────────────────────────────────────────────────────
 
+# 只读模式：禁止 openpyxl（防止 sandbox 内写入 Excel）。
+# 所有写操作必须通过 pipeline 工具（run_sop_matching / run_option_expansion）。
 ALLOWED_IMPORTS = {
-    "pandas", "openpyxl", "numpy", "json", "csv", "re", "collections",
+    "pandas", "numpy", "json", "csv", "re", "collections",
     "math", "itertools", "functools", "datetime", "pathlib",
 }
 
