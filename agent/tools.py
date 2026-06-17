@@ -79,31 +79,37 @@ def get_tool_by_name(name: str) -> ToolDef:
     name="run_sop_matching",
     description=(
         "执行 SOP 匹配管线——将主数据表的 SOP 代码映射填充到 POS 模板。"
-        "判断标准：用户需要「匹配」或「填充」两个 Excel 之间的对应关系。"
-        "调用前你必须先通过 ask_user 确认列映射，禁止自行猜测列名。"
-        "流程: read_excel_info 分析两张表 → ask_user 确认列映射 → run_sop_matching"
+        "调用前通过 ask_user 一次性展示完整列映射方案让用户整体确认，不要逐列询问。"
+        "Schema Analyzer 会自动识别列映射，直接展示结果请用户确认即可。"
+        "用户说 --sheet N → 传 template_sheet=N"
     ),
     parameters={
-        "master_path": {"type": "string", "description": "主数据表 Excel 文件路径"},
-        "template_path": {"type": "string", "description": "POS 模板 Excel 文件路径"},
-        "output_path": {"type": "string", "description": "输出 Excel 文件路径"},
-        "target_col": {"type": "string", "description": "模板中要填充的目标列名，默认「配料」"},
+        "master_path": {"type": "string", "description": "主数据表路径"},
+        "template_path": {"type": "string", "description": "POS 模板路径"},
+        "output_path": {"type": "string", "description": "输出路径"},
+        "target_col": {"type": "string", "description": "目标填充列，默认「配料」"},
+        "template_sheet": {"type": "integer", "description": "模板 Sheet 序号，用户说 --sheet N 时传 N"},
+        "master_sheet": {"type": "integer", "description": "主数据 Sheet 序号，默认 0"},
         "column_mapping": {
             "type": "object",
-            "description": "主数据列→标准字段的映射，如 {'温度':'做法', '产品名称':'品名'}。不确定时通过 ask_user 确认。",
+            "description": "仅当 Schema Analyzer 无法识别列名时才需手动传入",
         },
     },
     category="pipeline",
 )
 def run_sop_matching(
-    master_path: str, template_path: str, output_path: str,
-    target_col: str = "配料", column_mapping: dict = None,
+    master_path: str, template_path: str, output_path: str = "",
+    target_col: str = "配料", template_sheet: int = 0,
+    master_sheet: int = 0, column_mapping: dict = None,
 ) -> dict:
     """执行 SOP 匹配管线（Agent 调用入口）。"""
+    if not output_path:
+        output_path = template_path.replace(".xlsx", "_output.xlsx")
     from agent.orchestration import run_sop_pipeline_kwargs
     return run_sop_pipeline_kwargs(
         master_path=master_path, template_path=template_path,
         output_path=output_path, target_col=target_col,
+        template_sheet=template_sheet, master_sheet=master_sheet,
         column_mapping=column_mapping,
     )
 

@@ -420,6 +420,8 @@ def run_sop_pipeline_kwargs(
     output_path: str,
     target_col: str = "配料",
     report_path: str = "",
+    template_sheet: int = 0,
+    master_sheet: int = 0,
     column_mapping: Optional[dict] = None,
 ) -> dict:
     """Agent 直接调用入口 — 接受 keyword args，返回结构化结果。
@@ -457,6 +459,8 @@ def run_sop_pipeline_kwargs(
             output_path=output_path,
             report_path=report_path or output_path.replace(".xlsx", "_report.txt"),
             target_col=target_col,
+            master_sheet=master_sheet,
+            template_sheet=template_sheet,
         )
         elapsed = time.time() - t0
 
@@ -478,6 +482,7 @@ def run_sop_pipeline_kwargs(
             "api_calls": state.get("api_call_count", 0),
             "elapsed": elapsed,
             "output_path": output_path,
+            "report_path": report_path or output_path.replace(".xlsx", "_report.txt"),
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "elapsed": time.time() - t0}

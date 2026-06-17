@@ -38,18 +38,26 @@ def _build_system_prompt(cwd: str = "") -> str:
 {chr(10).join(tool_descriptions)}
 
 ## 判断标准
-- 对列语义不确定时，通过 ask_user 确认，禁止猜测列名
+- Schema Analyzer 会自动识别列映射，直接展示结果请用户整体确认即可
 - 用户确认的映射列数量决定管线选择：多列映射→run_sop_matching，单选项展开→run_option_expansion
-- 写入文件前必须通过 ask_user 获得用户明确确认
 - 工具返回错误时，自行决定：纠正参数重试、询问用户、或报告失败终止
 - 奶底/茶底为空是正常的通配行为，不是错误
 - execute_python 只能用于数据分析，禁止尝试写入文件
 
+## 交互效率
+- 展示信息和确认操作合并为一次 ask_user 调用
+- 禁止对同一任务的不同字段分多次 ask_user 确认
+- 格式：先展示完整方案，再问"是否执行"
+- 用户说 --sheet N → 传 template_sheet=N
+- 管线完成后用 execute_python 读取 report_path 指向的 txt 报告
+- 以表格展示：商品名 | 不匹配原因 | 行数，表格后给出检查建议
+
 ## 领域知识
 - 奶茶规格维度: 糖度/温度/规格/奶底/茶底
 - SOP 格式: "T240、B30/80、S4" (时间/配方/糖量)
-- 主数据常见列名: 品名/杯型/奶底/做法/糖/SOP/主编码/商品名称
+- 主数据常见列名: 品名/杯型/奶底/做法/糖/SOP/主编码/商品名称/代码
 - 模板常见列名: 菜品名称/规格/口味做法组合/配料/商品编码/选项名称
+- testdata/pos1test.xlsx 的 Sheet 0 是说明，Sheet 1 是数据模板
 
 ## 当前会话
 工作目录: {cwd or os.getcwd()}
