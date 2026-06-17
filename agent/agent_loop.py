@@ -90,14 +90,23 @@ class AgentLoop:
 
             for tc in response["tool_calls"]:
                 result = self._execute_tool(tc)
+                # 构建符合 OpenAI 格式的 assistant message（含 tool_calls）
+                tool_call_msg = {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["_name"],
+                        "arguments": json.dumps(tc["_parsed_args"], ensure_ascii=False),
+                    },
+                }
                 messages.append({
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": [tc],
+                    "tool_calls": [tool_call_msg],
                 })
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
+                    "tool_call_id": tc["id"],
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 })
 
@@ -134,9 +143,15 @@ class AgentLoop:
                         args = {}
                     tool_calls.append({
                         "id": tc.id,
-                        "name": tc.function.name,
-                        "arguments": args,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": json.dumps(args, ensure_ascii=False),
+                        },
                     })
+                    # 用于内部 dispatch（保留 parsed args）
+                    tool_calls[-1]["_parsed_args"] = args
+                    tool_calls[-1]["_name"] = tc.function.name
             return {
                 "content": msg.content,
                 "tool_calls": tool_calls,
@@ -146,8 +161,8 @@ class AgentLoop:
 
     def _execute_tool(self, tc: dict) -> dict:
         """执行单个 tool call，含守卫逻辑。"""
-        name = tc["name"]
-        args = tc.get("arguments", {})
+        name = tc.get("_name", tc.get("name", ""))
+        args = tc.get("_parsed_args", tc.get("arguments", {}))
 
         # 守卫 1: 工具存在性
         tool = self.tools.get(name)
@@ -241,7 +256,7 @@ if __name__ == "__main__":
     tc1 = MagicMock()
     tc1.id = "call_1"
     tc1.function.name = "read_excel_info"
-    tc1.function.arguments = f'{{"filepath": "{test_xlsx}"}}'
+    tc1.function.arguments = json.dumps({"filepath": test_xlsx})
     msg1.tool_calls = [tc1]
     msg2 = MagicMock()
     msg2.content = "文件 test.xlsx 有 3 列: A, B, C"
@@ -265,7 +280,7 @@ if __name__ == "__main__":
     tc3 = MagicMock()
     tc3.id = "call_x"
     tc3.function.name = "nonexistent_tool"
-    tc3.function.arguments = "{}"
+    tc3.function.arguments = json.dumps({})
 
     msg3a = MagicMock()
     msg3a.content = None
