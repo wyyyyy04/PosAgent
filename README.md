@@ -454,6 +454,7 @@ REPL 内支持以下斜杠指令：
 | CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译；**批量模式已禁用**（始终走交互确认）；**Windows 终端 UTF-8 全局输出**（解决中文乱码） | `3aa23cf` |
 | **选项规格展开器** | agent/option_expander.py, excel_io/ | ✅ 已完成 | expander: 49/49, reader: 33/33, writer: 30/30 | **全新独立管线**：主数据选项规格 → 模板展开；5 维度 × 中文分号分隔列表；固定列名、纯规则引擎、零 LLM；python main.py expand 子命令 | 176b846 |
 | **Tool 注册表 + 沙箱 + 编排层** | agent/tools.py, sandbox.py, orchestration.py | ✅ 已完成 | tools: 30/30, sandbox: 17/17, main: 14/14 | **架构重构**：规则函数注册为 LLM-callable Tool；Python exec() 沙箱；main.py 1081→180 行；业务逻辑抽出到 orchestration 层 | 8ce33d |
+| **memory.json 自测污染修复** | 6个文件加备份恢复 | ✅ 已修复 | 全部自测通过 + memory 完整性验证 | 所有 if __name__ == '__main__' 自测块开头备份 ~/.pos_agent/memory.json，结尾恢复；un_pos1_test.py 加 if __name__ 保护 | 78b6b14 |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
