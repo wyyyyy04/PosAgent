@@ -518,6 +518,15 @@ if __name__ == "__main__":
     import importlib
     importlib.reload(__import__("config"))
 
+    # ── 备份真实 memory.json ──
+    import shutil as _shutil
+    _mem_path = _os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_backup = None
+    if _os.path.exists(_mem_path):
+        _mem_backup_path = _mem_path + ".self_test_backup"
+        _shutil.copy(_mem_path, _mem_backup_path)
+        _mem_backup = _mem_backup_path
+
     from data.memory import reset_memory
 
     reset_memory()
@@ -776,5 +785,11 @@ if __name__ == "__main__":
 
     # cleanup
     reset_memory()
+
+    # ── 还原真实 memory.json ──
+    if _mem_backup:
+        from data.memory import reload as _mem_reload
+        _shutil.move(_mem_backup, _mem_path)
+        _mem_reload()
 
     print(f"=== 结果: {passed} passed, {failed} failed ===")

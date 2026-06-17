@@ -263,7 +263,15 @@ def read_option_master(filepath: str, sheet_name=0) -> pd.DataFrame:
 
 if __name__ == "__main__":
     import tempfile
-    import os
+    import os, shutil as _shutil
+
+    # ── 备份真实 memory.json ──
+    _mem_path = os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_backup = None
+    if os.path.exists(_mem_path):
+        _mem_backup_path = _mem_path + ".self_test_backup"
+        _shutil.copy(_mem_path, _mem_backup_path)
+        _mem_backup = _mem_backup_path
 
     passed = 0
     failed = 0
@@ -534,5 +542,11 @@ if __name__ == "__main__":
             if os.path.exists(f):
                 os.remove(f)
         os.rmdir(tmpdir)
+
+    # ── 还原真实 memory.json ──
+    if _mem_backup:
+        from data.memory import reload as _mem_reload
+        _shutil.move(_mem_backup, _mem_path)
+        _mem_reload()
 
     print(f"=== 结果: {passed} passed, {failed} failed ===")

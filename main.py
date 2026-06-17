@@ -91,8 +91,17 @@ if __name__ == "__main__":
     # 自测模式
     if "--self-test" in sys.argv:
         sys.argv.remove("--self-test")
-        import tempfile
+        import tempfile, shutil
         import pandas as pd
+
+        # ── 备份真实 memory.json（防止自测清空长期记忆）──
+        _mem_path = os.path.expanduser("~/.pos_agent/memory.json")
+        _mem_backup = None
+        if os.path.exists(_mem_path):
+            _mem_backup_path = _mem_path + ".self_test_backup"
+            shutil.copy(_mem_path, _mem_backup_path)
+            _mem_backup = _mem_backup_path
+
         from agent.orchestration import (
             set_batch_mode, set_column_prompt_hook,
             _batch_mode,
@@ -268,6 +277,12 @@ if __name__ == "__main__":
 
         from agent.token_classifier import reset_cache
         reset_cache()
+
+        # ── 还原真实 memory.json ──
+        if _mem_backup:
+            from data.memory import reload as mem_reload
+            shutil.move(_mem_backup, _mem_path)
+            mem_reload()
 
         print(f"=== 结果: {passed} passed, {failed} failed ===")
 

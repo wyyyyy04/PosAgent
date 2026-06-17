@@ -422,8 +422,17 @@ def classify_from_dataframe(
 # ── 自测 ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import os as _os, shutil as _shutil
     import pandas as pd
     from data.memory import reset_memory, get_token_type as mem_get
+
+    # ── 备份真实 memory.json ──
+    _mem_path = _os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_backup = None
+    if _os.path.exists(_mem_path):
+        _mem_backup_path = _mem_path + ".self_test_backup"
+        _shutil.copy(_mem_path, _mem_backup_path)
+        _mem_backup = _mem_backup_path
 
     # 自测使用临时记忆，避免污染真实数据
     reset_memory()
@@ -796,6 +805,12 @@ if __name__ == "__main__":
 
     # 清理
     set_prompt_hook(None)
+
+    # ── 还原真实 memory.json ──
+    if _mem_backup:
+        from data.memory import reload as _mem_reload
+        _shutil.move(_mem_backup, _mem_path)
+        _mem_reload()
 
     # ── 汇总 ──
     print(f"=== 结果: {passed} passed, {failed} failed ===")
