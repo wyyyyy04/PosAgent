@@ -68,7 +68,19 @@ def _load() -> Dict[str, Any]:
             with open(_MEMORY_PATH, "r", encoding="utf-8") as f:
                 _data = json.load(f)
         except (json.JSONDecodeError, IOError):
-            _data = _default_structure()
+            # 文件损坏 → 尝试从 .bak 恢复
+            bak_path = _MEMORY_PATH + ".bak"
+            if os.path.exists(bak_path):
+                try:
+                    with open(bak_path, "r", encoding="utf-8") as fb:
+                        _data = json.load(fb)
+                    print(f"[WARNING] 记忆文件损坏，已从 .bak 备份恢复")
+                except (json.JSONDecodeError, IOError):
+                    _data = _default_structure()
+                    print(f"[WARNING] 记忆文件及备份均损坏，已重置为空")
+            else:
+                _data = _default_structure()
+                print(f"[WARNING] 记忆文件损坏且无备份，已重置为空")
     else:
         _data = _default_structure()
 
@@ -92,16 +104,35 @@ def _default_structure() -> Dict[str, Any]:
 
 
 def _save() -> None:
-    """将记忆数据持久化到磁盘。"""
+    """将记忆数据原子化持久化到磁盘。
+
+    先写临时文件，再原子替换，防止写入过程中断导致文件损坏。
+    写入前保留一份 .bak 备份，极端情况下可手动恢复。
+    """
     global _data, _dirty
     if _data is None:
         return
     _ensure_dir()
     try:
-        with open(_MEMORY_PATH, "w", encoding="utf-8") as f:
+        # Step 1: 写入临时文件
+        tmp_path = _MEMORY_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(_data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # 确保刷到磁盘（Windows 关键）
+
+        # Step 2: 保留旧文件为 .bak
+        bak_path = _MEMORY_PATH + ".bak"
+        if os.path.exists(_MEMORY_PATH):
+            try:
+                os.replace(_MEMORY_PATH, bak_path)
+            except OSError:
+                pass  # 备份失败不阻塞
+
+        # Step 3: 原子替换
+        os.replace(tmp_path, _MEMORY_PATH)
         _dirty = False
-    except IOError as e:
+    except (IOError, OSError) as e:
         print(f"[WARNING] 记忆保存失败: {e}")
 
 
