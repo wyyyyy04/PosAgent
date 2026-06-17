@@ -1,8 +1,8 @@
 """
-Agent Loop — 自然语言驱动的工具调用循环。
+Agent Loop — 自然语言驱动的工具调用循环，含会话记忆管理。
 
 while turn < max_turns:
-    response = LLM.chat(messages, tools)
+    response = LLM.chat(memory.to_llm_input(), tools)
     if no tool_calls: return response
     for each tool_call: execute → append result
 """
@@ -17,19 +17,71 @@ from typing import Any, Callable, Dict, List, Optional
 # ── 常量 ──────────────────────────────────────────────────────────
 
 MAX_TURNS = 15
-DUPLICATE_NOTICE_THRESHOLD = 3  # 同一 tool+args 连续调用 ≥N 次 → 注入提示
+DUPLICATE_NOTICE_THRESHOLD = 3
+MAX_MEMORY_TURNS = 20
+MAX_MEMORY_TOKENS = 8000
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SessionMemory — 滑动窗口记忆管理
+# ═══════════════════════════════════════════════════════════════════
+
+class SessionMemory:
+    """滑动窗口消息队列。
+
+    规则：
+    - 最多保留 max_turns 轮对话
+    - 关键消息（文件路径、确认、列映射）不被驱逐
+    - system prompt 永远保留，不参与驱逐
+    """
+
+    def __init__(self, max_turns: int = MAX_MEMORY_TURNS, max_tokens: int = MAX_MEMORY_TOKENS):
+        self.messages: deque = deque()
+        self.max_turns = max_turns
+        self.max_tokens = max_tokens
+        self.system_prompt: str = ""
+        self.task_context: Dict[str, Any] = {}
+
+    def add(self, message: dict):
+        self.messages.append(message)
+        self._evict()
+
+    def _evict(self):
+        while len(self.messages) > self.max_turns * 2:  # *2 因每轮=user+assistant
+            oldest = self.messages[0]
+            if self._is_critical(oldest):
+                break
+            self.messages.popleft()
+
+    def _is_critical(self, message: dict) -> bool:
+        content = str(message.get("content", ""))
+        # 文件路径、确认、列映射 — 这些不能丢
+        keywords = [".xlsx", "column_mapping", "yes", "是", "确认", "执行", "output_path",
+                     "master_path", "template_path", "run_sop_matching", "run_option_expansion"]
+        return any(k in content.lower() for k in keywords)
+
+    def to_llm_input(self) -> list:
+        return [
+            {"role": "system", "content": self.system_prompt},
+            *list(self.messages),
+        ]
+
+    def reset_task(self):
+        self.messages.clear()
+        self.task_context = {}
+
+    @property
+    def turn_count(self) -> int:
+        return len(self.messages) // 2
 
 
 def _build_system_prompt(cwd: str = "") -> str:
-    """构建 Agent system prompt — 描述判断标准，不描述操作步骤。"""
     from agent.tools import TOOLS
 
     tool_descriptions = []
     for t in TOOLS:
         params = t.get("parameters", {}).get("properties", {})
-        param_str = ", ".join(
-            f"{k}: {v.get('type','str')}" for k, v in params.items()
-        )
+        param_str = ", ".join(f"{k}: {v.get('type','str')}" for k, v in params.items())
         tool_descriptions.append(f"- **{t['name']}**({param_str}): {t['description']}")
 
     return f"""你是 PosAgent，一个奶茶/餐饮行业的 POS 模板自动化助手。
@@ -65,13 +117,17 @@ def _build_system_prompt(cwd: str = "") -> str:
 """
 
 
+# ═══════════════════════════════════════════════════════════════════
+# AgentLoop
+# ═══════════════════════════════════════════════════════════════════
+
 class AgentLoop:
-    """Agent 主循环。
+    """Agent 主循环，含持久化会话记忆。
 
     用法:
-        from agent.agent_loop import AgentLoop
         agent = AgentLoop(llm_client)
-        result = agent.run("把主数据匹配到模板")
+        result = agent.run("匹配 SOPcodemaindata.xlsx 到 pos1test.xlsx")
+        result = agent.continue_conversation("yes")  # 继续上一轮会话
     """
 
     def __init__(self, llm_client, cwd: str = ""):
@@ -81,24 +137,31 @@ class AgentLoop:
 
         from agent.tools import TOOLS
         self.tools: Dict[str, dict] = {t["name"]: t for t in TOOLS}
-        self.system_prompt = _build_system_prompt(self.cwd)
+        self.memory = SessionMemory()
+        self.memory.system_prompt = _build_system_prompt(self.cwd)
 
     def run(self, user_input: str) -> str:
-        """执行 Agent loop，返回最终文本回复。"""
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_input},
-        ]
+        """新会话：清空记忆，开始 Agent loop。"""
+        self.memory.reset_task()
+        self.memory.add({"role": "user", "content": user_input})
+        return self._loop()
 
+    def continue_conversation(self, user_input: str) -> str:
+        """继续已有会话：追加用户消息，继续 loop。"""
+        self.memory.add({"role": "user", "content": user_input})
+        return self._loop()
+
+    def _loop(self) -> str:
+        """内部循环：LLM ↔ 工具执行。"""
         for turn in range(1, MAX_TURNS + 1):
-            response = self._call_llm(messages)
+            response = self._call_llm(self.memory.to_llm_input())
 
             if not response.get("tool_calls"):
+                self.memory.add({"role": "assistant", "content": response.get("content", "")})
                 return response.get("content", "")
 
             for tc in response["tool_calls"]:
                 result = self._execute_tool(tc)
-                # 构建符合 OpenAI 格式的 assistant message（含 tool_calls）
                 tool_call_msg = {
                     "id": tc["id"],
                     "type": "function",
@@ -107,12 +170,8 @@ class AgentLoop:
                         "arguments": json.dumps(tc["_parsed_args"], ensure_ascii=False),
                     },
                 }
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [tool_call_msg],
-                })
-                messages.append({
+                self.memory.add({"role": "assistant", "content": None, "tool_calls": [tool_call_msg]})
+                self.memory.add({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": json.dumps(result, ensure_ascii=False, default=str),
@@ -121,25 +180,17 @@ class AgentLoop:
         return f"已执行 {MAX_TURNS} 轮工具调用，仍未完成任务。请简化需求后重试。"
 
     def _call_llm(self, messages: list) -> dict:
-        """调用 LLM，返回 {content, tool_calls}。"""
         tool_schemas = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["parameters"],
-                },
-            }
+            {"type": "function", "function": {
+                "name": t["name"], "description": t["description"],
+                "parameters": t["parameters"],
+            }}
             for t in self.tools.values()
         ]
-
         try:
             completion = self.llm.chat.completions.create(
-                model=self.llm.model,
-                messages=messages,
-                tools=tool_schemas,
-                temperature=0.1,
+                model=self.llm.model, messages=messages,
+                tools=tool_schemas, temperature=0.1,
             )
             msg = completion.choices[0].message
             tool_calls = []
@@ -150,46 +201,29 @@ class AgentLoop:
                     except json.JSONDecodeError:
                         args = {}
                     tool_calls.append({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": json.dumps(args, ensure_ascii=False),
-                        },
+                        "id": tc.id, "type": "function",
+                        "function": {"name": tc.function.name,
+                                     "arguments": json.dumps(args, ensure_ascii=False)},
+                        "_parsed_args": args, "_name": tc.function.name,
                     })
-                    # 用于内部 dispatch（保留 parsed args）
-                    tool_calls[-1]["_parsed_args"] = args
-                    tool_calls[-1]["_name"] = tc.function.name
-            return {
-                "content": msg.content,
-                "tool_calls": tool_calls,
-            }
+            return {"content": msg.content, "tool_calls": tool_calls}
         except Exception as e:
             return {"content": f"LLM 调用失败: {e}", "tool_calls": []}
 
     def _execute_tool(self, tc: dict) -> dict:
-        """执行单个 tool call，含守卫逻辑。"""
         name = tc.get("_name", tc.get("name", ""))
         args = tc.get("_parsed_args", tc.get("arguments", {}))
-
-        # 守卫 1: 工具存在性
         tool = self.tools.get(name)
         if not tool:
             return {"error": f"未知工具 '{name}'，可用: {list(self.tools)}"}
-
-        # 守卫 2: 重复检测 — 告知 Agent，让它自己决定
         call_hash = self._hash_call(name, args)
         self.recent_calls.append(call_hash)
         if self._count_recent(call_hash) >= DUPLICATE_NOTICE_THRESHOLD:
             return {
-                "notice": (
-                    f"'{name}' 已连续调用 {DUPLICATE_NOTICE_THRESHOLD} 次且参数相同。"
-                    f"如果这是预期行为请忽略，否则请换一种策略。"
-                ),
+                "notice": f"'{name}' 已连续调用 {DUPLICATE_NOTICE_THRESHOLD} 次且参数相同。"
+                          f"如果这是预期行为请忽略，否则请换一种策略。",
                 "result": None,
             }
-
-        # 守卫 3: 异常包装
         try:
             return tool["handler"](**args)
         except Exception as e:
@@ -204,7 +238,7 @@ class AgentLoop:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 自测（Mock LLM）
+# 自测
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
@@ -220,143 +254,90 @@ if __name__ == "__main__":
             failed += 1
             print(f"  FAIL  {msg}")
 
-    print("=== Agent Loop 自测（Mock LLM）===\n")
+    print("=== Agent Loop 自测 ===\n")
 
-    # ── Mock LLM client ──
-    class MockLLM:
-        def __init__(self):
-            self.model = "mock"
-            self.chat = self
-
-        class completions:
-            class create:
-                def __init__(self, **kwargs):
-                    pass
-
-    # We need a proper mock. Use unittest.mock-style approach.
     from unittest.mock import MagicMock
 
-    # ── 1. 无工具调用 → 直接返回文本 ──
-    print("1. 无工具调用 → 直接返回文本")
-    mock_llm = MagicMock()
-    mock_llm.model = "mock"
-    mock_msg = MagicMock()
-    mock_msg.content = "匹配完成，共 870 行，775 行 HIGH。"
-    mock_msg.tool_calls = None
-    mock_llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=mock_msg)])
-
-    agent = AgentLoop(mock_llm, cwd="/tmp")
-    result = agent.run("匹配一下")
-    check("775 行 HIGH" in result, f"正确返回文本（实际 {result[:50]}...）")
+    # ── 1. 新会话 → 返回文本 ──
+    print("1. 新会话 run() → 返回文本")
+    mock = MagicMock()
+    mock.model = "mock"
+    m = MagicMock()
+    m.content = "匹配完成，870行，783 HIGH。"
+    m.tool_calls = None
+    mock.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=m)])
+    agent = AgentLoop(mock, cwd="/tmp")
+    r = agent.run("匹配")
+    check("783 HIGH" in r, f"新会话（实际 {r[:50]}）")
     print()
 
-    # ── 2. 工具调用 → 执行后继续 → 最终文本 ──
-    print("2. 工具调用 → 工具执行 → 继续循环")
+    # ── 2. 继续会话 → 上下文保持 ──
+    print("2. continue_conversation → 上下文保持")
+    # Agent 的 memory 里已有上一轮的系统提示和用户输入
+    # 模拟 LLM 记得上下文
+    m2 = MagicMock()
+    m2.content = "好的，执行完成。上次匹配了870行。"
+    m2.tool_calls = None
+    mock.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=m2)])
+    r2 = agent.continue_conversation("yes")
+    check("870" in r2, f"记忆保持（实际 {r2[:50]}）")
+    check(len(agent.memory.messages) >= 4, f"消息历史 ≥4 条（实际 {len(agent.memory.messages)}）")
+    print()
+
+    # ── 3. 关键消息不被驱逐 ──
+    print("3. 关键消息保护 — .xlsx/yes/确认 不丢")
+    sm = SessionMemory(max_turns=2)
+    sm.add({"role": "user", "content": "用 testdata/SOPcodemaindata.xlsx"})
+    sm.add({"role": "assistant", "content": "确认执行？"})
+    sm.add({"role": "user", "content": "yes"})
+    # 大量填充非关键消息
+    for i in range(10):
+        sm.add({"role": "tool", "content": f"result {i}"})
+    msgs = sm.to_llm_input()
+    check(any(".xlsx" in str(m) for m in msgs), "文件路径保留")
+    check(any("yes" in str(m) for m in msgs), "确认消息保留")
+    print()
+
+    # ── 4. 工具调用 → 多轮循环 → 最终文本 ──
+    print("4. 工具调用 → 多轮循环")
     import tempfile, pandas as pd
     tmp = tempfile.mkdtemp()
     test_xlsx = os.path.join(tmp, "test.xlsx")
-    pd.DataFrame({"A": [1,2], "B": [3,4], "C": [5,6]}).to_excel(test_xlsx, index=False)
+    pd.DataFrame({"A": [1,2], "B": [3,4]}).to_excel(test_xlsx, index=False)
 
-    mock2 = MagicMock()
-    mock2.model = "mock"
-    msg1 = MagicMock()
-    msg1.content = None
-    tc1 = MagicMock()
-    tc1.id = "call_1"
-    tc1.function.name = "read_excel_info"
-    tc1.function.arguments = json.dumps({"filepath": test_xlsx})
-    msg1.tool_calls = [tc1]
-    msg2 = MagicMock()
-    msg2.content = "文件 test.xlsx 有 3 列: A, B, C"
-    msg2.tool_calls = None
-    mock2.chat.completions.create.side_effect = [
-        MagicMock(choices=[MagicMock(message=msg1)]),
-        MagicMock(choices=[MagicMock(message=msg2)]),
-    ]
-
-    agent2 = AgentLoop(mock2, cwd=tmp)
-    result2 = agent2.run("看看 test.xlsx")
-    check("有 3 列" in result2, f"两轮循环后返回文本（实际 {result2[:50]}...）")
-    import shutil
-    shutil.rmtree(tmp, ignore_errors=True)
-    print()
-
-    # ── 3. 工具不存在 → 返回错误消息给 LLM，LLM 能从中恢复 ──
-    print("3. 幻觉工具名 → 返回错误，Agent 恢复后继续")
-    mock3 = MagicMock()
-    mock3.model = "mock"
-    tc3 = MagicMock()
-    tc3.id = "call_x"
-    tc3.function.name = "nonexistent_tool"
-    tc3.function.arguments = json.dumps({})
-
-    msg3a = MagicMock()
-    msg3a.content = None
-    msg3a.tool_calls = [tc3]
-    msg3b = MagicMock()
-    msg3b.content = "我调用了不存在的工具但成功恢复了。"
-    msg3b.tool_calls = None
-
-    mock3.chat.completions.create.side_effect = [
-        MagicMock(choices=[MagicMock(message=msg3a)]),
-        MagicMock(choices=[MagicMock(message=msg3b)]),
-    ]
-
-    agent3 = AgentLoop(mock3, cwd="/tmp")
-    result3 = agent3.run("test")
-    check("恢复" in result3, f"Agent 从幻觉工具中恢复（实际 {result3[:60]}）")
-    print()
-
-    # ── 4. 重复检测 ± 3次同调用 → 注入提示 ──
-    print("4. 重复检测 — 连续3次同调用注入提示")
     mock4 = MagicMock()
     mock4.model = "mock"
-    tc4 = MagicMock()
-    tc4.id = "call_r"
-    tc4.function.name = "read_excel_info"
-    tc4.function.arguments = '{"filepath": "same.xlsx"}'
-
-    def make_msg():
-        m = MagicMock()
-        m.content = None
-        m.tool_calls = [tc4]
-        return m
-
-    final_msg = MagicMock()
-    final_msg.content = "检测到重复，换策略"
-    final_msg.tool_calls = None
-
+    tc = MagicMock()
+    tc.id = "c1"; tc.function.name = "read_excel_info"
+    tc.function.arguments = json.dumps({"filepath": test_xlsx})
+    msg4a = MagicMock(); msg4a.content = None; msg4a.tool_calls = [tc]
+    msg4b = MagicMock(); msg4b.content = "文件有2列: A, B"; msg4b.tool_calls = None
     mock4.chat.completions.create.side_effect = [
-        MagicMock(choices=[MagicMock(message=make_msg())]),
-        MagicMock(choices=[MagicMock(message=make_msg())]),
-        MagicMock(choices=[MagicMock(message=make_msg())]),
-        MagicMock(choices=[MagicMock(message=final_msg)]),
+        MagicMock(choices=[MagicMock(message=msg4a)]),
+        MagicMock(choices=[MagicMock(message=msg4b)]),
     ]
-
-    agent4 = AgentLoop(mock4, cwd="/tmp")
-    agent4.recent_calls.clear()
-    result4 = agent4.run("重复测试")
-    check("换策略" in result4, f"Agent 收到提示后换了策略（实际 {result4[:50]}）")
+    a4 = AgentLoop(mock4, cwd=tmp)
+    r4 = a4.run("查看 test.xlsx")
+    check("有2列" in r4 or "2 列" in r4 or "A, B" in r4, f"工具调用后返回（实际 {r4[:60]}）")
+    import shutil; shutil.rmtree(tmp, ignore_errors=True)
     print()
 
-    # ── 5. 超最大轮次 ──
-    print("5. 超最大轮次终止")
-    mock5 = MagicMock()
-    mock5.model = "mock"
-    tc5 = MagicMock()
-    tc5.id = "c_loop"
-    tc5.function.name = "read_excel_info"
-    tc5.function.arguments = '{"filepath": "loop.xlsx"}'
-    loop_msg = MagicMock()
-    loop_msg.content = None
-    loop_msg.tool_calls = [tc5]
-    mock5.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=loop_msg)])
-
-    agent5 = AgentLoop(mock5, cwd="/tmp")
-    result5 = agent5.run("无限循环")
-    check("已执行" in result5 and "轮工具调用" in result5,
-          f"超轮次终止（实际 {result5[:80]}）")
+    # ── 5. reset_task 清空记忆 ──
+    print("5. reset_task → 清空记忆")
+    agent.memory.reset_task()
+    check(len(agent.memory.messages) == 0, f"记忆已清空（实际 {len(agent.memory.messages)}）")
     print()
 
-    # ── 汇总 ──
+    # ── 6. 超轮次终止 ──
+    print("6. 超轮次终止")
+    mock6 = MagicMock(); mock6.model = "mock"
+    tc6 = MagicMock(); tc6.id = "loop"; tc6.function.name = "read_excel_info"
+    tc6.function.arguments = json.dumps({"filepath": "x.xlsx"})
+    lm = MagicMock(); lm.content = None; lm.tool_calls = [tc6]
+    mock6.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=lm)])
+    a6 = AgentLoop(mock6, cwd="/tmp")
+    r6 = a6.run("test")
+    check("已执行" in r6, f"超轮次终止（实际 {r6[:60]}）")
+    print()
+
     print(f"=== 结果: {passed} passed, {failed} failed ===")

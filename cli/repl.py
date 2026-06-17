@@ -432,6 +432,20 @@ def _handle_confirm(action: str, payload: str) -> str:
 
 # ── REPL 主循环 ────────────────────────────────────────────────────
 
+_nl_agent = None  # 进程级短期记忆：REPL 会话内跨轮次持久，退出进程即销毁
+
+
+def _get_nl_agent():
+    global _nl_agent
+    if _nl_agent is None:
+        from openai import OpenAI
+        import config
+        llm = OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.DEEPSEEK_BASE_URL)
+        llm.model = config.DEEPSEEK_MODEL
+        from agent.agent_loop import AgentLoop
+        _nl_agent = AgentLoop(llm)
+    return _nl_agent
+
 
 def repl_loop() -> None:
     """REPL 主循环。读取用户输入 → 分发执行 → 打印结果。"""
@@ -510,19 +524,10 @@ def repl_loop() -> None:
                 if run_result:
                     print(run_result)
             else:
-                # 自然语言 → Agent Loop
-                print()  # 空行分隔
+                # 自然语言 → Agent Loop（短期记忆跨轮次保持）
+                print()
                 try:
-                    from openai import OpenAI
-                    import config
-                    llm = OpenAI(
-                        api_key=config.DEEPSEEK_API_KEY,
-                        base_url=config.DEEPSEEK_BASE_URL,
-                    )
-                    llm.model = config.DEEPSEEK_MODEL
-                    from agent.agent_loop import AgentLoop
-                    agent = AgentLoop(llm)
-                    result = agent.run(line.strip())
+                    result = _get_nl_agent().continue_conversation(line.strip())
                     print(f"\n{result}")
                 except ImportError:
                     print("[ERROR] Agent 模式需要 openai 库。请使用 /run 命令。")
