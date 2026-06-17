@@ -1,4 +1,4 @@
-"""
+﻿"""
 Option Specification Template Expander — 选项规格模板展开器。
 
 将包含选项规格定义的主数据表展开为选项模板的明细行。
@@ -9,7 +9,7 @@ Option Specification Template Expander — 选项规格模板展开器。
 """
 
 import math
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -109,30 +109,34 @@ def _match_to_yes_no(value: str, target: Any) -> str:
 
 # ── 核心展开函数 ──────────────────────────────────────────────────
 
-def expand_master_to_options(master_df: pd.DataFrame) -> pd.DataFrame:
+def expand_master_to_options(
+    master_df: pd.DataFrame,
+    column_mapping: Optional[dict] = None,
+) -> pd.DataFrame:
     """将主数据行展开为选项规格模板行。
 
-    对每一行主数据，遍历 5 个维度（糖度/温度/规格/奶底/茶底），
-    将每个维度的选项列表（；分隔）拆分为独立的模板行。
-
     Args:
-        master_df: 主数据 DataFrame，预期包含以下列：
-            主编码, 商品名称,
-            推荐糖度, 默认糖度, 糖度,
-            推荐温度, 默认温度, 温度,
-            推荐规格, 默认规格, 规格,
-            推荐奶底, 默认奶底, 奶底,
-            推荐茶底, 默认茶底, 茶底
+        master_df: 主数据 DataFrame。
+        column_mapping: Agent 传入的列映射（可选），格式:
+            {"product_code": "主编码", "product_name": "商品名称",
+             "dimensions": {"糖度": "甜度", "温度": "温度"}}
+            用于适配不同列名的模板。未指定的维度使用默认列名。
 
     Returns:
         DataFrame with TEMPLATE_COLUMNS，每行一个选项值。
-
-    Raises:
-        ValueError: 缺少「主编码」或「商品名称」列。
     """
+    # 应用列映射
+    if column_mapping:
+        pc = column_mapping.get("product_code", "主编码")
+        pn = column_mapping.get("product_name", "商品名称")
+        dim_map = column_mapping.get("dimensions", {})
+    else:
+        pc, pn = "主编码", "商品名称"
+        dim_map = {}
+
     # 验证必要列
     missing_fixed = []
-    for col in ["主编码", "商品名称"]:
+    for col in [pc, pn]:
         if col not in master_df.columns:
             missing_fixed.append(col)
     if missing_fixed:
@@ -148,29 +152,28 @@ def expand_master_to_options(master_df: pd.DataFrame) -> pd.DataFrame:
     seen_codes = set()
 
     for _, mrow in master_df.iterrows():
-        product_code = str(mrow["主编码"]).strip() if not _empty(mrow.get("主编码")) else ""
+        product_code = str(mrow[pc]).strip() if not _empty(mrow.get(pc)) else ""
         if product_code in seen_codes:
             continue
         seen_codes.add(product_code)
 
-        product_name = str(mrow["商品名称"]).strip() if not _empty(mrow.get("商品名称")) else ""
+        product_name = str(mrow[pn]).strip() if not _empty(mrow.get(pn)) else ""
 
         if not product_code and not product_name:
-            # 主编码和商品名称都为空 → 跳过
             print(f"[WARNING] 主数据行缺少主编码和商品名称，已跳过")
             continue
 
         for dim in DIMENSIONS:
-            # 解析维度选项列表
-            dim_values = _parse_dimension_list(mrow.get(dim))
+            actual_dim = dim_map.get(dim, dim)
+            actual_rec = dim_map.get(f"推荐{dim}", f"推荐{dim}")
+            actual_def = dim_map.get(f"默认{dim}", f"默认{dim}")
 
+            dim_values = _parse_dimension_list(mrow.get(actual_dim))
             if not dim_values:
-                # 维度列表为空 → 跳过
                 continue
 
-            # 获取推荐值和默认值
-            recommended_val = mrow.get(f"推荐{dim}")
-            default_val = mrow.get(f"默认{dim}")
+            recommended_val = mrow.get(actual_rec)
+            default_val = mrow.get(actual_def)
 
             for value in dim_values:
                 rows.append({

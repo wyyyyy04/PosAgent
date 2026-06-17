@@ -502,11 +502,32 @@ def repl_loop() -> None:
             if result:
                 print(result)
         else:
-            # 非斜杠开头 → 当作 /run 指令处理
-            # 支持直接输入: -m file -t file -o out
-            run_result = _cmd_run(_parse_line(line)[1] if line else [])
-            if run_result:
-                print(run_result)
+            # 非斜杠开头 → 自然语言模式（Agent Loop）或 CLI 参数（/run 向后兼容）
+            parts = _parse_line(line)
+            if parts and parts[0].startswith("-"):
+                # 以 - 开头 → 传统 CLI 模式
+                run_result = _cmd_run(parts)
+                if run_result:
+                    print(run_result)
+            else:
+                # 自然语言 → Agent Loop
+                print()  # 空行分隔
+                try:
+                    from openai import OpenAI
+                    import config
+                    llm = OpenAI(
+                        api_key=config.DEEPSEEK_API_KEY,
+                        base_url=config.DEEPSEEK_BASE_URL,
+                    )
+                    llm.model = config.DEEPSEEK_MODEL
+                    from agent.agent_loop import AgentLoop
+                    agent = AgentLoop(llm)
+                    result = agent.run(line.strip())
+                    print(f"\n{result}")
+                except ImportError:
+                    print("[ERROR] Agent 模式需要 openai 库。请使用 /run 命令。")
+                except Exception as e:
+                    print(f"[ERROR] Agent 执行失败: {e}")
 
 
 # ── 自测 ──────────────────────────────────────────────────────────
