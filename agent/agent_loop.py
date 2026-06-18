@@ -174,7 +174,7 @@ class AgentLoop:
                 self.memory.add({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "content": json.dumps(self._sanitize(result), ensure_ascii=False, default=str),
                 })
 
         return f"已执行 {MAX_TURNS} 轮工具调用，仍未完成任务。请简化需求后重试。"
@@ -228,6 +228,18 @@ class AgentLoop:
             return tool["handler"](**args)
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
+
+    @staticmethod
+    def _sanitize(obj):
+        """递归转换非字符串 key 为字符串，确保 json.dumps 可用。"""
+        if isinstance(obj, dict):
+            return {
+                k if isinstance(k, (str, int, float, bool, type(None))) else str(k):
+                AgentLoop._sanitize(v) for k, v in obj.items()
+            }
+        if isinstance(obj, (list, tuple, set)):
+            return [AgentLoop._sanitize(v) for v in obj]
+        return obj
 
     def _hash_call(self, name: str, args: dict) -> str:
         raw = json.dumps({"n": name, "a": args}, sort_keys=True, ensure_ascii=False)
