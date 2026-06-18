@@ -92,9 +92,14 @@ def _build_system_prompt(cwd: str = "") -> str:
 ## 判断标准
 - Schema Analyzer 会自动识别列映射，直接展示结果请用户整体确认即可
 - 用户确认的映射列数量决定管线选择：多列映射→run_sop_matching，单选项展开→run_option_expansion
-- 工具返回错误时，自行决定：纠正参数重试、询问用户、或报告失败终止
 - 奶底/茶底为空是正常的通配行为，不是错误
 - execute_python 只能用于数据分析，禁止尝试写入文件
+
+## 错误处理
+- 工具返回 fatal:true → 立即停止，把 error 和 hint 直接展示给用户，不要重试
+- 工具返回 retryable:false → 换一种方式，不要用相同参数重试
+- 工具返回 retryable:true → 可以纠正参数后重试，最多 2 次
+- 所有错误必须告知用户具体原因和建议，禁止静默吞掉
 
 ## 交互效率
 - 展示信息和确认操作合并为一次 ask_user 调用
@@ -153,6 +158,8 @@ class AgentLoop:
 
     def _loop(self) -> str:
         """内部循环：LLM ↔ 工具执行。"""
+        last_error = None
+
         for turn in range(1, MAX_TURNS + 1):
             response = self._call_llm(self.memory.to_llm_input())
 
@@ -162,22 +169,45 @@ class AgentLoop:
 
             for tc in response["tool_calls"]:
                 result = self._execute_tool(tc)
-                tool_call_msg = {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["_name"],
-                        "arguments": json.dumps(tc["_parsed_args"], ensure_ascii=False),
-                    },
-                }
-                self.memory.add({"role": "assistant", "content": None, "tool_calls": [tool_call_msg]})
+
+                # 不可恢复错误 → 立即终止，告知用户
+                if isinstance(result, dict) and result.get("fatal"):
+                    self.memory.add({"role": "assistant", "content": None,
+                                     "tool_calls": [self._make_tool_msg(tc)]})
+                    self.memory.add({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps(self._sanitize(result), ensure_ascii=False, default=str)})
+                    return (
+                        f"操作无法继续：{result.get('error', '')}\n\n"
+                        f"💡 {result.get('hint', '')}"
+                    )
+
+                last_error = result if isinstance(result, dict) and "error" in result else None
+
+                self.memory.add({"role": "assistant", "content": None,
+                                 "tool_calls": [self._make_tool_msg(tc)]})
                 self.memory.add({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": json.dumps(self._sanitize(result), ensure_ascii=False, default=str),
                 })
 
+        # 超时 → 带上最后失败原因
+        if last_error:
+            return (
+                f"已执行 {MAX_TURNS} 轮，仍未能完成任务。\n\n"
+                f"最后一次失败：{last_error.get('error', '未知')}\n"
+                f"💡 {last_error.get('hint', '请简化需求后重试')}"
+            )
         return f"已执行 {MAX_TURNS} 轮工具调用，仍未完成任务。请简化需求后重试。"
+
+    def _make_tool_msg(self, tc: dict) -> dict:
+        return {
+            "id": tc["id"], "type": "function",
+            "function": {
+                "name": tc["_name"],
+                "arguments": json.dumps(tc["_parsed_args"], ensure_ascii=False),
+            },
+        }
 
     def _call_llm(self, messages: list) -> dict:
         tool_schemas = [
@@ -215,19 +245,48 @@ class AgentLoop:
         args = tc.get("_parsed_args", tc.get("arguments", {}))
         tool = self.tools.get(name)
         if not tool:
-            return {"error": f"未知工具 '{name}'，可用: {list(self.tools)}"}
+            return {
+                "error_type": "unknown_tool",
+                "error": f"未知工具 '{name}'，可用: {list(self.tools)}",
+                "hint": "请使用可用工具列表中的工具",
+                "retryable": False,
+                "fatal": False,  # 让 LLM 有机会修正
+            }
         call_hash = self._hash_call(name, args)
         self.recent_calls.append(call_hash)
         if self._count_recent(call_hash) >= DUPLICATE_NOTICE_THRESHOLD:
             return {
+                "error_type": "duplicate_call",
                 "notice": f"'{name}' 已连续调用 {DUPLICATE_NOTICE_THRESHOLD} 次且参数相同。"
                           f"如果这是预期行为请忽略，否则请换一种策略。",
-                "result": None,
+                "retryable": True,
             }
         try:
             return tool["handler"](**args)
+        except PermissionError as e:
+            return {
+                "error_type": "file_locked",
+                "error": f"文件被占用，无法写入: {e}",
+                "hint": "请关闭 Excel 中打开的输出文件后重试，或换一个输出文件名",
+                "retryable": False,
+                "fatal": True,
+            }
+        except FileNotFoundError as e:
+            return {
+                "error_type": "file_not_found",
+                "error": f"文件不存在: {e}",
+                "hint": "请检查文件路径是否正确，文件是否已被移动或删除",
+                "retryable": False,
+                "fatal": True,
+            }
         except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+            return {
+                "error_type": type(e).__name__,
+                "error": f"{type(e).__name__}: {e}",
+                "hint": "请将此错误展示给用户，询问是否需要帮助排查",
+                "retryable": True,
+                "fatal": False,
+            }
 
     @staticmethod
     def _sanitize(obj):
