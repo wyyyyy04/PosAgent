@@ -78,7 +78,7 @@ def _cmd_help(_args: List[str]) -> str:
 
 def _cmd_memory_list(_args: List[str]) -> str:
     """列出所有 token 别名。"""
-    from data.memory import list_aliases
+    from menupilot.data.memory import list_aliases
 
     aliases = list_aliases()
     if not aliases:
@@ -111,7 +111,7 @@ def _cmd_memory_add(args: List[str]) -> str:
             f"中文别名: {', '.join(_VALID_TYPES_CN)}"
         )
 
-    from data.memory import add_token
+    from menupilot.data.memory import add_token
 
     add_token(word, cn_type)
     en_type = _TYPE_CN_TO_EN.get(cn_type, cn_type)
@@ -134,7 +134,7 @@ def _cmd_memory_edit(args: List[str]) -> str:
             f"中文别名: {', '.join(_VALID_TYPES_CN)}"
         )
 
-    from data.memory import edit_token, get_token_type
+    from menupilot.data.memory import edit_token, get_token_type
 
     old_type = get_token_type(word)
     if old_type is None:
@@ -153,7 +153,7 @@ def _cmd_memory_delete(args: List[str]) -> str:
         return "用法: /memory delete <词语>"
 
     word = args[0]
-    from data.memory import get_token_type
+    from menupilot.data.memory import get_token_type
 
     if get_token_type(word) is None:
         return f"词条「{word}」不存在"
@@ -163,7 +163,7 @@ def _cmd_memory_delete(args: List[str]) -> str:
 
 def _cmd_memory_reset(_args: List[str]) -> str:
     """清空所有记忆（需二次确认）。"""
-    from data.memory import get_stats
+    from menupilot.data.memory import get_stats
 
     stats = get_stats()
     return (
@@ -175,7 +175,7 @@ def _cmd_memory_reset(_args: List[str]) -> str:
 
 def _cmd_template_list(_args: List[str]) -> str:
     """列出已缓存的模板。"""
-    from data.memory import get_template_rules
+    from menupilot.data.memory import get_template_rules
 
     rules = get_template_rules()
     if not rules:
@@ -201,7 +201,7 @@ def _cmd_template_show(args: List[str]) -> str:
         return "用法: /template show <指纹前N位>"
 
     prefix = args[0]
-    from data.memory import get_template_rules
+    from menupilot.data.memory import get_template_rules
 
     rules = get_template_rules()
     matches = [(fp, entry) for fp, entry in rules.items() if fp.startswith(prefix)]
@@ -246,7 +246,7 @@ def _cmd_template_clear(args: List[str]) -> str:
         return "用法: /template clear <指纹前N位>"
 
     prefix = args[0]
-    from data.memory import get_template_rules
+    from menupilot.data.memory import get_template_rules
 
     rules = get_template_rules()
     matches = [(fp, entry) for fp, entry in rules.items() if fp.startswith(prefix)]
@@ -404,13 +404,13 @@ def _handle_confirm(action: str, payload: str) -> str:
     """
     if action == "delete_token":
         word = payload
-        from data.memory import delete_token as mem_delete_token
+        from menupilot.data.memory import delete_token as mem_delete_token
 
         ok = mem_delete_token(word)
         return f"已删除词条「{word}」" if ok else f"删除失败：词条「{word}」不存在"
 
     elif action == "reset_memory":
-        from data.memory import reset_memory as mem_reset
+        from menupilot.data.memory import reset_memory as mem_reset
 
         mem_reset()
         return "已清空所有长期记忆"
@@ -419,7 +419,7 @@ def _handle_confirm(action: str, payload: str) -> str:
         parts = payload.split(" ", 1)
         fp = parts[0]
         prefix = parts[1] if len(parts) > 1 else fp[:8]
-        from data.memory import delete_template_rule as mem_delete_template
+        from menupilot.data.memory import delete_template_rule as mem_delete_template
 
         deleted = mem_delete_template(fp)
         if deleted:
@@ -439,10 +439,10 @@ def _get_nl_agent():
     global _nl_agent
     if _nl_agent is None:
         from openai import OpenAI
-        import config
+        from menupilot import config
         llm = OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.DEEPSEEK_BASE_URL)
         llm.model = config.DEEPSEEK_MODEL
-        from agent.agent_loop import AgentLoop
+        from menupilot.agent.agent_loop import AgentLoop
         _nl_agent = AgentLoop(llm)
     return _nl_agent
 
@@ -546,14 +546,14 @@ if __name__ == "__main__":
 
     # ── 备份真实 memory.json ──
     import shutil as _shutil
-    _mem_path = _os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_path = _os.path.expanduser("~/.menupilot/memory.json")
     _mem_backup = None
     if _os.path.exists(_mem_path):
         _mem_backup_path = _mem_path + ".self_test_backup"
         _shutil.copy(_mem_path, _mem_backup_path)
         _mem_backup = _mem_backup_path
 
-    from data.memory import reset_memory
+    from menupilot.data.memory import reset_memory
 
     reset_memory()
 
@@ -620,7 +620,7 @@ if __name__ == "__main__":
     confirm_result = _handle_confirm("delete_token", "珍珠奶茶")
     check("已删除" in confirm_result, f"确认后删除成功: {confirm_result}")
     # 验证已删除
-    from data.memory import get_token_type
+    from menupilot.data.memory import get_token_type
     check(get_token_type("珍珠奶茶") is None, "删除后词条不存在")
     print()
 
@@ -671,7 +671,7 @@ if __name__ == "__main__":
 
     # ── 11. /template list 有缓存 ──
     print("11. /template list 有缓存时展示")
-    from data.memory import save_template_rule
+    from menupilot.data.memory import save_template_rule
     save_template_rule("a1b2c3d4e5f6a7b8", {
         "field_mapping": {"菜品名称": "product_name", "规格": "size"},
         "composite_col": "口味做法组合",
@@ -723,7 +723,7 @@ if __name__ == "__main__":
     clear_confirm = _handle_confirm(clear_action, clear_payload)
     check("已删除" in clear_confirm, f"确认后删除成功: {clear_confirm}")
     # 验证已删除
-    from data.memory import get_template_rules
+    from menupilot.data.memory import get_template_rules
     check(len(get_template_rules()) == 0, "缓存已清空")
     print()
 
@@ -766,7 +766,7 @@ if __name__ == "__main__":
         "配料": ["", ""],
     }).to_excel(template_path, index=False)
 
-    from agent.token_classifier import reset_cache
+    from menupilot.agent.token_classifier import reset_cache
     reset_cache()
 
     run_cmd = f'/run -m "{master_path}" -t "{template_path}" -o "{output_path}"'
@@ -814,7 +814,7 @@ if __name__ == "__main__":
 
     # ── 还原真实 memory.json ──
     if _mem_backup:
-        from data.memory import reload as _mem_reload
+        from menupilot.data.memory import reload as _mem_reload
         _shutil.move(_mem_backup, _mem_path)
         _mem_reload()
 

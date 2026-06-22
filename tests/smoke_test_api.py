@@ -20,10 +20,7 @@ import sys
 import time
 import argparse
 
-# 确保项目根在 sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import config
+from menupilot import config
 
 # 强制关闭 Mock 模式
 config.USE_MOCK_LLM = False
@@ -72,7 +69,7 @@ def test_schema_analyzer():
     """用真实 API 测试 Schema Analyzer 的完整链路：调用 -> 解析 -> 验证。"""
     global failed, passed
 
-    from agent.schema_analyzer import analyze, reset_cache
+    from menupilot.agent.schema_analyzer import analyze, reset_cache
 
     section("Schema Analyzer 真实 API 冒烟")
 
@@ -109,7 +106,7 @@ def test_schema_analyzer():
     check(len(fm) >= 2, f"field_mapping 至少 2 个映射（实际 {len(fm)}）")
 
     # 3. 映射值必须是合法的 canonical 字段
-    from data.canonical_schema import CANONICAL_FIELDS
+    from menupilot.data.canonical_schema import CANONICAL_FIELDS
     for tcol, cfield in fm.items():
         check(
             cfield in CANONICAL_FIELDS,
@@ -139,7 +136,7 @@ def test_token_classifier():
     """用真实 API 测试 Token Classifier 的完整链路：调用 -> 解析 -> 验证。"""
     global failed, passed
 
-    from agent.token_classifier import classify_batch, classify_single, reset_cache
+    from menupilot.agent.token_classifier import classify_batch, classify_single, reset_cache
 
     section("Token Classifier 真实 API 冒烟")
 

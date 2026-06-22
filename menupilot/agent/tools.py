@@ -105,7 +105,7 @@ def run_sop_matching(
     """执行 SOP 匹配管线（Agent 调用入口）。"""
     if not output_path:
         output_path = template_path.replace(".xlsx", "_output.xlsx")
-    from agent.orchestration import run_sop_pipeline_kwargs
+    from menupilot.agent.orchestration import run_sop_pipeline_kwargs
     return run_sop_pipeline_kwargs(
         master_path=master_path, template_path=template_path,
         output_path=output_path, target_col=target_col,
@@ -141,7 +141,7 @@ def run_option_expansion(
     master_path: str, template_path: str, output_path: str,
 ) -> dict:
     """执行选项规格展开管线。"""
-    from agent.orchestration import run_expand_pipeline
+    from menupilot.agent.orchestration import run_expand_pipeline
     exit_code = run_expand_pipeline([
         "--master", master_path, "--template", template_path, "--output", output_path,
     ])
@@ -227,7 +227,7 @@ def read_excel_info(filepath: str, sheet_name: int = 0) -> dict:
 )
 def execute_python(code: str) -> dict:
     """在沙箱中执行 Python 代码。"""
-    from agent.sandbox import execute as sandbox_execute
+    from menupilot.agent.sandbox import execute as sandbox_execute
     return sandbox_execute(code)
 
 
@@ -260,7 +260,7 @@ def query_token_dict(
     token_type: str = "",
 ) -> dict:
     """查询 Token 词典。"""
-    from data.token_dict import lookup, list_types, get_tokens_by_type
+    from menupilot.data.token_dict import lookup, list_types, get_tokens_by_type
 
     if action == "lookup":
         if not value:

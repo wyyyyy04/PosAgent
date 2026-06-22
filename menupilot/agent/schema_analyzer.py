@@ -9,10 +9,10 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-import config
-from data.canonical_schema import CANONICAL_FIELDS
-from data.memory import get_template_rule as mem_get_template_rule
-from data.memory import save_template_rule as mem_save_template_rule
+from menupilot import config
+from menupilot.data.canonical_schema import CANONICAL_FIELDS
+from menupilot.data.memory import get_template_rule as mem_get_template_rule
+from menupilot.data.memory import save_template_rule as mem_save_template_rule
 
 # ── Prompt 模板 ──────────────────────────────────────────────────
 
@@ -318,7 +318,7 @@ def analyze(
     # Stage 1: Pre-LLM — 注入已知列别名
     # ═══════════════════════════════════════════════════════════════
 
-    from data.memory import get_column_alias
+    from menupilot.data.memory import get_column_alias
 
     known_fm: Dict[str, str] = {}
     known_irrelevant: List[str] = []
@@ -620,7 +620,7 @@ if __name__ == "__main__":
     import importlib
     importlib.reload(config)
 
-    # 重新导入 schema_analyzer 以获取更新后的 config 引用（import config 是动态访问，不需重新导入本模块）
+    # 重新导入 schema_analyzer 以获取更新后的 config 引用（from menupilot import config 是动态访问，不需重新导入本模块）
     # 但 config 模块本身需要 reload 以更新 USE_MOCK_LLM
 
     passed = 0
@@ -763,14 +763,14 @@ if __name__ == "__main__":
 
     # ── 备份真实 memory.json ──
     import shutil as _shutil
-    _mem_path = os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_path = os.path.expanduser("~/.menupilot/memory.json")
     _mem_backup = None
     if os.path.exists(_mem_path):
         _mem_backup_path = _mem_path + ".self_test_backup"
         _shutil.copy(_mem_path, _mem_backup_path)
         _mem_backup = _mem_backup_path
 
-    from data.memory import reset_memory, get_template_rule as mem_get_rule
+    from menupilot.data.memory import reset_memory, get_template_rule as mem_get_rule
     reset_memory()
 
     columns_a = ["菜品名称", "规格", "口味做法组合", "配料"]
@@ -874,7 +874,7 @@ if __name__ == "__main__":
     print("16. pre-LLM 列别名注入（column_aliases 记忆）")
     reset_memory()
     reset_cache()
-    from data.memory import add_column_alias, get_column_alias as mem_get_col
+    from menupilot.data.memory import add_column_alias, get_column_alias as mem_get_col
 
     # 预设列别名
     add_column_alias("菜品名称", "product_name")
@@ -1013,12 +1013,12 @@ if __name__ == "__main__":
 
     # 清理
     config.MOCK_SCHEMA_RESPONSE = original_mock
-    from data.memory import reset_memory as rm
+    from menupilot.data.memory import reset_memory as rm
     rm()
 
     # ── 还原真实 memory.json ──
     if _mem_backup:
-        from data.memory import reload as _mem_reload
+        from menupilot.data.memory import reload as _mem_reload
         _shutil.move(_mem_backup, _mem_path)
         _mem_reload()
 

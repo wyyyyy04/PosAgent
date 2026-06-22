@@ -2,7 +2,7 @@
 Human Review CLI — 低置信度行交互式审核。
 
 用法:
-    from cli.human_review import run_review
+    from menupilot.cli.human_review import run_review
     result = run_review(low_conf_rows, master_fingerprint)
 """
 

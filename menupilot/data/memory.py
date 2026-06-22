@@ -1,7 +1,7 @@
 """
 长期记忆管理 — 持久化存储未知词分类、模板规则、匹配修正。
 
-存储路径：~/.pos_agent/memory.json（用户目录，不入 git）。
+存储路径：~/.menupilot/memory.json（用户目录，不入 git）。
 与 CLI 的 /memory 指令共用同一存储文件。
 
 结构:
@@ -21,8 +21,22 @@ from typing import Any, Dict, Optional
 
 # ── 存储路径 ─────────────────────────────────────────────────────
 
-_MEMORY_DIR = os.path.join(os.path.expanduser("~"), ".pos_agent")
+_MEMORY_DIR = os.path.join(os.path.expanduser("~"), ".menupilot")
 _MEMORY_PATH = os.path.join(_MEMORY_DIR, "memory.json")
+
+# ── 兼容迁移：旧目录 → 新目录 ──
+_OLD_MEMORY_DIR = os.path.join(os.path.expanduser("~"), ".pos_agent")
+_OLD_MEMORY_PATH = os.path.join(_OLD_MEMORY_DIR, "memory.json")
+
+def _migrate_old_data():
+    """如果旧目录存在且新目录不存在，自动迁移数据。"""
+    if os.path.exists(_OLD_MEMORY_PATH) and not os.path.exists(_MEMORY_PATH):
+        try:
+            import shutil
+            os.makedirs(_MEMORY_DIR, exist_ok=True)
+            shutil.copy(_OLD_MEMORY_PATH, _MEMORY_PATH)
+        except Exception:
+            pass  # 迁移失败不阻塞启动
 
 # ── 内存缓存 ─────────────────────────────────────────────────────
 
@@ -63,6 +77,7 @@ def _load() -> Dict[str, Any]:
         return _data
 
     _ensure_dir()
+    _migrate_old_data()
     if os.path.exists(_MEMORY_PATH):
         try:
             with open(_MEMORY_PATH, "r", encoding="utf-8") as f:

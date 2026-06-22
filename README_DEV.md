@@ -447,14 +447,14 @@ REPL 内支持以下斜杠指令：
 | Rule Engine | agent/rule_engine.py | ✅ 已完成 | 73/73 passed | 主数据/模板标准化 + Token 验证 + 奶底通配；**主数据缺奶底/茶底列时自动通配**（INFO 日志，不报错不交互）；缺必要维度列抛 ValueError | `6679745` |
 | Schema Analyzer | agent/schema_analyzer.py | ✅ 已完成 | 38/38 passed | LLM 字段语义分析 + **模板指纹持久化缓存**（三级：进程→磁盘→LLM）；Mock 模式 | `cbf30ae` |
 | Token Classifier | agent/token_classifier.py | ✅ 已完成 | 60/60 passed | **纯规则词典分类**（逗号切割 → normalize → lookup）+ **未知词四级兜底**（词典→记忆→LLM猜测→交互）；LLM 先猜再确认(y/n)，批量模式自动写入；_llm_guess_cache 进程缓存 | `c83ec74` |
-| 长期记忆 | data/memory.py | ✅ 已完成 | 49/49 passed | JSON 持久化（~/.pos_agent/memory.json）、token别名/模板规则/匹配修正/列别名/确认映射五级存储、**模板指纹缓存**（get/save_template_rule）、**确认映射**（build_confirmed_key/add_confirmed_mapping/get_confirmed_mapping）、/memory 指令共用 | `cbf30ae` |
+| 长期记忆 | data/memory.py | ✅ 已完成 | 49/49 passed | JSON 持久化（~/.menupilot/memory.json）、token别名/模板规则/匹配修正/列别名/确认映射五级存储、**模板指纹缓存**（get/save_template_rule）、**确认映射**（build_confirmed_key/add_confirmed_mapping/get_confirmed_mapping）、/memory 指令共用 | `cbf30ae` |
 | Matching Engine | agent/matching_engine.py | ✅ 已完成 | 35/35 passed | RapidFuzz 商品名匹配、属性组合规则匹配、奶底通配、LOW_CONFIDENCE 兜底、**按产品分组的控制台摘要报告** + failure_reason 中文映射 | `fec7ffe` |
 | LangGraph 工作流 | agent/workflow.py | ✅ 已完成 | 51/51 passed | **条件路由**：`route_after_load`（error→write_output / chowbus→preprocess / standard→analyze_schema）、`route_after_match`（error→write_output / low_conf→human_review / high→write_output）；**checkpointer**：MemorySaver + _DataFrameSerde（DataFrame msgpack 序列化）；PipelineState(TypedDict, total=False)；LangGraph 默认启用；**Human Review 节点暂停调用**（代码保留）；**修复**：chowbus 预处理 lambda 适配 hook 三参数协议 | `db59cb5` |
 | Human Review | cli/human_review.py | ⏸️ 暂停 | 10/10 passed | 低置信度行交互式审核（接受/手动输入/本次跳过/永久跳过）、run_review_silent 批量模式；**长期记忆持久化**：`confirmed_mappings`；**暂停原因**：逐个确认低置信度行体验不佳，当前阶段输出报告即可 | `d85baaa` |
 | CLI 入口 | main.py | ✅ 已完成 | 33/33 passed | argparse 参数解析、--master/--template/--output/--target-col/--report、**chowbus 模板类型预检测**、主数据列推断中文字段名→英文 canonical 翻译；**批量模式已禁用**（始终走交互确认）；**Windows 终端 UTF-8 全局输出**（解决中文乱码） | `3aa23cf` |
 | **选项规格展开器** | agent/option_expander.py, excel_io/ | ✅ 已完成 | expander: 49/49, reader: 33/33, writer: 30/30 | **全新独立管线**：主数据选项规格 → 模板展开；5 维度 × 中文分号分隔列表；固定列名、纯规则引擎、零 LLM；python main.py expand 子命令 | 176b846 |
 | **Tool 注册表 + 沙箱 + 编排层** | agent/tools.py, sandbox.py, orchestration.py | ✅ 已完成 | tools: 30/30, sandbox: 17/17, main: 14/14 | **架构重构**：规则函数注册为 LLM-callable Tool；Python exec() 沙箱；main.py 1081→180 行；业务逻辑抽出到 orchestration 层 | 8ce33d |
-| **memory.json 自测污染修复** | 6个文件加备份恢复 | ✅ 已修复 | 全部自测通过 + memory 完整性验证 | 所有 if __name__ == '__main__' 自测块开头备份 ~/.pos_agent/memory.json，结尾恢复；un_pos1_test.py 加 if __name__ 保护 | 78b6b14 |
+| **memory.json 自测污染修复** | 6个文件加备份恢复 | ✅ 已修复 | 全部自测通过 + memory 完整性验证 | 所有 if __name__ == '__main__' 自测块开头备份 ~/.menupilot/memory.json，结尾恢复；un_pos1_test.py 加 if __name__ 保护 | 78b6b14 |
 | REPL 交互 | cli/repl.py | ✅ 已完成 | 46/46 passed | 10 个斜杠指令（/memory /template /run /help /exit）、确认机制、中英文类型映射、破坏性操作二次确认 | `a27f660` |
 
 ## MVP 验证结果（testdata/ 真实数据）
@@ -521,7 +521,7 @@ REPL 内支持以下斜杠指令：
 - **效果**：异名列（如 `温度`）自动对齐到标准列名（`做法`），无需手动重命名 Excel
 
 ### Schema 交互兜底 + 模板指纹缓存（`ad3d898`）
-- **列别名记忆**：跨模板共享的列名→canonical 字段映射，存储在 `~/.pos_agent/memory.json`
+- **列别名记忆**：跨模板共享的列名→canonical 字段映射，存储在 `~/.menupilot/memory.json`
 - **模板指纹缓存**：同一模板第二次运行时跳过 LLM Schema 分析 + 交互
 - **三级缓存**：进程内缓存 → 磁盘记忆 → LLM 调用
 - **效果**：二次运行 API=0, 0.1s（**无限倍提速**，准确率不变）
@@ -538,7 +538,7 @@ REPL 内支持以下斜杠指令：
 - **词典补充**：扫描 testdata/ 真数据，新增茶底词条「茉莉绿茶」
 
 ### 长期记忆 + 未知词兜底（本轮）
-- **新增** `data/memory.py`：JSON 持久化存储（`~/.pos_agent/memory.json`），不入 git
+- **新增** `data/memory.py`：JSON 持久化存储（`~/.menupilot/memory.json`），不入 git
 - **存储结构**：`token_aliases`（未知词→类型映射）、`template_rules`、`match_corrections`、`column_aliases`（列名映射）
 - **三级兜底机制**：标准词典 → 长期记忆 → 交互式确认（同词每进程仅问一次）
 - **交互确认**：三个选项（加入词典/标 UNKNOWN 继续/跳过此行）、支持 mock hook 自动化测试

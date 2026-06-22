@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rapidfuzz import fuzz
 
-import config
-from data.canonical_schema import CANONICAL_FIELDS, REQUIRED_DIMENSIONS, WILDCARD_DIMENSIONS
+from menupilot import config
+from menupilot.data.canonical_schema import CANONICAL_FIELDS, REQUIRED_DIMENSIONS, WILDCARD_DIMENSIONS
 
 # ── 常量 ────────────────────────────────────────────────────────
 

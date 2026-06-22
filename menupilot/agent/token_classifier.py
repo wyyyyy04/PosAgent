@@ -14,10 +14,10 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-import config
-from data.memory import add_token as mem_add_token
-from data.memory import get_token_type as mem_get_token_type
-from data.token_dict import lookup, normalize_token, UNKNOWN_TOKEN
+from menupilot import config
+from menupilot.data.memory import add_token as mem_add_token
+from menupilot.data.memory import get_token_type as mem_get_token_type
+from menupilot.data.token_dict import lookup, normalize_token, UNKNOWN_TOKEN
 
 # Token Classifier 关注的 4 个维度（规格不在组合字段中，有独立列）
 ALL_DIMENSIONS = ["茶底", "奶底", "糖度", "温度"]
@@ -424,10 +424,10 @@ def classify_from_dataframe(
 if __name__ == "__main__":
     import os as _os, shutil as _shutil
     import pandas as pd
-    from data.memory import reset_memory, get_token_type as mem_get
+    from menupilot.data.memory import reset_memory, get_token_type as mem_get
 
     # ── 备份真实 memory.json ──
-    _mem_path = _os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_path = _os.path.expanduser("~/.menupilot/memory.json")
     _mem_backup = None
     if _os.path.exists(_mem_path):
         _mem_backup_path = _mem_path + ".self_test_backup"
@@ -469,7 +469,7 @@ if __name__ == "__main__":
     # ── 2. 长期记忆中的词 → 直接返回，不触发询问 ──
     print("2. 长期记忆中的词 — 直接返回（mem_get_token_type）")
     # 预先写入记忆
-    from data.memory import add_token as mem_add
+    from menupilot.data.memory import add_token as mem_add
     mem_add("黑芝麻仙草", "茶底")
     check(mem_get("黑芝麻仙草") == "茶底", "记忆写入了 '黑芝麻仙草'")
 
@@ -808,7 +808,7 @@ if __name__ == "__main__":
 
     # ── 还原真实 memory.json ──
     if _mem_backup:
-        from data.memory import reload as _mem_reload
+        from menupilot.data.memory import reload as _mem_reload
         _shutil.move(_mem_backup, _mem_path)
         _mem_reload()
 

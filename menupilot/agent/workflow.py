@@ -17,18 +17,18 @@ except ImportError:
 
 import pandas as pd
 
-from agent.matching_engine import generate_console_summary, generate_report as me_generate_report
-from agent.matching_engine import match
-from agent.rule_engine import (
+from menupilot.agent.matching_engine import generate_console_summary, generate_report as me_generate_report
+from menupilot.agent.matching_engine import match
+from menupilot.agent.rule_engine import (
     check_row_completeness,
     master_to_canonical,
     template_to_canonical,
     validate_tokens,
 )
-from agent.schema_analyzer import analyze_from_dataframe
-from agent.token_classifier import classify_from_dataframe, reset_cache as tc_reset_cache
-from excel_io.excel_reader import read_master, read_template
-from excel_io.excel_writer import write_result
+from menupilot.agent.schema_analyzer import analyze_from_dataframe
+from menupilot.agent.token_classifier import classify_from_dataframe, reset_cache as tc_reset_cache
+from menupilot.excel_io.excel_reader import read_master, read_template
+from menupilot.excel_io.excel_writer import write_result
 
 # ── 工作流状态键 ────────────────────────────────────────────────
 
@@ -139,12 +139,12 @@ def step_load_data(state: PipelineState) -> PipelineState:
     if state.get("error") is not None:
         return state
     try:
-        from agent.template_preprocessor import detect_template_type, collect_chowbus_rows
+        from menupilot.agent.template_preprocessor import detect_template_type, collect_chowbus_rows
 
         state["master_df"] = read_master(state["master_path"], sheet_name=state["master_sheet"])
 
         # 先以 header=None 读取模板原始数据，用于类型检测
-        from excel_io.excel_reader import read_template_raw
+        from menupilot.excel_io.excel_reader import read_template_raw
         raw_df = read_template_raw(state["template_path"], sheet_name=state["template_sheet"])
         state["template_type"] = detect_template_type(raw_df)
 
@@ -174,11 +174,11 @@ def step_preprocess(state: PipelineState) -> PipelineState:
     if state.get("error") is not None or state["template_type"] != "chowbus":
         return state
     try:
-        from agent.token_classifier import (
+        from menupilot.agent.token_classifier import (
             classify_single,
             set_prompt_hook as tc_set_prompt_hook,
         )
-        from agent.rule_engine import master_to_canonical
+        from menupilot.agent.rule_engine import master_to_canonical
 
         # 注入静默钩子：UNKNOWN 不触发询问
         tc_set_prompt_hook(lambda word, ctx, llm: {"action": "skip"})
@@ -198,8 +198,8 @@ def step_preprocess(state: PipelineState) -> PipelineState:
         tc_set_prompt_hook(None)
 
         # 转换为 Canonical Schema 行
-        from data.canonical_schema import CANONICAL_FIELDS
-        from data.token_dict import normalize_token
+        from menupilot.data.canonical_schema import CANONICAL_FIELDS
+        from menupilot.data.token_dict import normalize_token
 
         canonical_rows = []
         for row in state["chowbus_rows"]:
@@ -481,8 +481,8 @@ def step_human_review(state: PipelineState) -> PipelineState:
         str(state.get("master_path", ""))
     )
 
-    from data.memory import add_confirmed_mapping, build_confirmed_key
-    from data.memory import get_confirmed_mapping
+    from menupilot.data.memory import add_confirmed_mapping, build_confirmed_key
+    from menupilot.data.memory import get_confirmed_mapping
 
     for decision in decisions:
         idx = decision["row_index"]
@@ -661,9 +661,9 @@ def run_pipeline(
     )
 
     # 重置 API 调用计数器 + 会话新增 token 追踪
-    from agent.schema_analyzer import reset_api_call_count as _sa_reset
-    from agent.token_classifier import reset_api_call_count as _tc_reset
-    from data.memory import reset_new_tokens as _reset_new_tokens
+    from menupilot.agent.schema_analyzer import reset_api_call_count as _sa_reset
+    from menupilot.agent.token_classifier import reset_api_call_count as _tc_reset
+    from menupilot.data.memory import reset_new_tokens as _reset_new_tokens
     _sa_reset()
     _tc_reset()
     _reset_new_tokens()
@@ -684,14 +684,14 @@ def run_pipeline(
         #     master_fp = _compute_master_fingerprint(
         #         str(snap_state.get("master_path", ""))
         #     )
-        #     from cli.human_review import run_review
+        #     from menupilot.cli.human_review import run_review
         #     review_result = run_review(low_conf, master_fp)
         #     app.update_state(config, {"human_review_result": review_result})
         #     result = app.invoke(None, config)
 
         # 收集 API 调用统计
-        from agent.schema_analyzer import get_api_call_count as _sa_count
-        from agent.token_classifier import get_api_call_count as _tc_count
+        from menupilot.agent.schema_analyzer import get_api_call_count as _sa_count
+        from menupilot.agent.token_classifier import get_api_call_count as _tc_count
         result["api_call_count"] = _sa_count() + _tc_count()
         return result
 
@@ -720,7 +720,7 @@ def run_pipeline(
     #         if r.get("confidence") == "LOW_CONFIDENCE"
     #     ]
     #     if low_conf_rows:
-    #         from cli.human_review import run_review
+    #         from menupilot.cli.human_review import run_review
     #         master_fp = _compute_master_fingerprint(
     #             str(state.get("master_path", ""))
     #         )
@@ -733,8 +733,8 @@ def run_pipeline(
         step_write_output(state)
 
     # 收集 API 调用统计
-    from agent.schema_analyzer import get_api_call_count as _sa_count
-    from agent.token_classifier import get_api_call_count as _tc_count
+    from menupilot.agent.schema_analyzer import get_api_call_count as _sa_count
+    from menupilot.agent.token_classifier import get_api_call_count as _tc_count
     state["api_call_count"] = _sa_count() + _tc_count()
 
     return state
@@ -771,7 +771,7 @@ if __name__ == "__main__":
     output_path = os.path.join(tmpdir, "output.xlsx")
 
     # ── 覆盖 Mock 响应以匹配测试数据 ──
-    import config as cfg
+    from menupilot import config as cfg
 
     original_mock_schema = dict(cfg.MOCK_SCHEMA_RESPONSE)
     tc_reset_cache()

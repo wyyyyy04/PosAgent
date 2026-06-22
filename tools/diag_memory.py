@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-MEM_PATH = os.path.join(os.path.expanduser("~"), ".pos_agent", "memory.json")
+MEM_PATH = os.path.join(os.path.expanduser("~"), ".menupilot", "memory.json")
 
 # ── 读当前状态 ──
 with open(MEM_PATH, "r", encoding="utf-8") as f:

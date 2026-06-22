@@ -78,7 +78,7 @@ def _interactive_classify_columns(
             f"[WARNING] 批量模式，以下 {len(unrecognized_cols)} 个列无法自动识别，"
             f"将跳过: {col_list}"
         )
-        print("          如需手动指定列映射，请使用 REPL 模式: python main.py（无参数启动）")
+        print("          如需手动指定列映射，请使用 REPL 模式: menupilot（无参数启动）")
         for col in unrecognized_cols:
             schema_result["irrelevant_cols"].append(col)
         schema_result["unrecognized_cols"] = []
@@ -86,7 +86,7 @@ def _interactive_classify_columns(
 
     # ── 交互模式（REPL / TTY）──
     import pandas as pd
-    from data.memory import add_column_alias
+    from menupilot.data.memory import add_column_alias
 
     _skipped_count = 0
 
@@ -207,11 +207,11 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
         exit code: 0=成功, 1=失败
     """
     import argparse as _argparse
-    from agent.workflow import run_pipeline
+    from menupilot.agent.workflow import run_pipeline
 
     # 构建 parser（与 main.py 的 build_parser 一致）
     parser = _argparse.ArgumentParser(
-        prog="python main.py",
+        prog="menupilot",
         description="POS Template Mapping Agent — 自动将主数据表 SOP 映射到 POS 模板",
     )
     parser.add_argument("-m", "--master", required=True, help="主数据表 Excel 文件路径")
@@ -246,12 +246,12 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
     print(f"  报告:     {report_path}")
     print("-" * 56)
 
-    import config as _cfg
+    from menupilot import config as _cfg
     print(f"  LLM 模式: {'MOCK' if _cfg.USE_MOCK_LLM else 'REAL'} (模型: {_cfg.DEEPSEEK_MODEL})")
 
     # ── 模板类型检测 ──
-    from excel_io.excel_reader import read_template_raw, read_template
-    from agent.template_preprocessor import detect_template_type
+    from menupilot.excel_io.excel_reader import read_template_raw, read_template
+    from menupilot.agent.template_preprocessor import detect_template_type
 
     raw_df = read_template_raw(opts.template, sheet_name=template_sheet)
     _template_type = detect_template_type(raw_df)
@@ -261,11 +261,11 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
         opts.target_col = "sop_code"
     else:
         # ── Schema 预分析 + 交互兜底 ──
-        from agent.schema_analyzer import (
+        from menupilot.agent.schema_analyzer import (
             _template_fingerprint,
             analyze_from_dataframe,
         )
-        from data.memory import (
+        from menupilot.data.memory import (
             get_template_rule as mem_get_template_rule,
             save_template_rule as mem_save_template_rule,
         )
@@ -286,12 +286,12 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
                 print(f"[Schema] 完整结果已写入模板指纹缓存 {fingerprint[:12]}...")
 
     # ── 主数据预加载 + 列推断 ──
-    from excel_io.excel_reader import (
+    from menupilot.excel_io.excel_reader import (
         read_master, MASTER_REQUIRED_COLUMNS,
         MASTER_WILDCARD_COLUMNS, MASTER_OPTIONAL_COLUMNS,
     )
-    from data.memory import add_column_alias as mem_add_col_alias
-    from agent.schema_analyzer import infer_master_columns
+    from menupilot.data.memory import add_column_alias as mem_add_col_alias
+    from menupilot.agent.schema_analyzer import infer_master_columns
 
     master_df = read_master(opts.master, sheet_name=master_sheet, soft_validation=True)
     missing_master = master_df.attrs.get("_missing_required", [])
@@ -342,7 +342,7 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
                     print(f"[WARNING] 以下 {len(low_conf)} 列未能高置信度识别，批量模式下将跳过: {col_list}")
                     for col, info in low_conf.items():
                         print(f"           「{col}」→ {info.get('reason', '无法判断')}")
-                    print("          如需手动指定列映射，请使用 REPL 模式: python main.py（无参数启动）")
+                    print("          如需手动指定列映射，请使用 REPL 模式: menupilot（无参数启动）")
                 else:
                     print(f"[Master] 以下 {len(low_conf)} 列未能高置信度识别，需手动确认:")
                     _interactive_classify_columns(
@@ -355,7 +355,7 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
             missing_str = "、".join(str(c) for c in missing_master)
             if _batch_mode:
                 print(f"[WARNING] 缺少必要字段 {missing_master}，且无候选列可推断，将跳过: {missing_str}")
-                print("          如需手动指定列映射，请使用 REPL 模式: python main.py（无参数启动）")
+                print("          如需手动指定列映射，请使用 REPL 模式: menupilot（无参数启动）")
             else:
                 print(f"[Master] 缺少必要字段 {missing_master}，且无候选列，请手动确认")
                 _interactive_classify_columns(
@@ -401,7 +401,7 @@ def run_sop_pipeline(args: Optional[list] = None) -> int:
         print(f"     总行数:   {total}")
         print(f"     高置信度: {high} ({100*high/total:.1f}%)")
 
-    from data.memory import get_new_tokens
+    from menupilot.data.memory import get_new_tokens
     new_tokens = get_new_tokens()
     if new_tokens:
         print(f"\n  [记忆] 本次运行新增了 {len(new_tokens)} 个 token 别名:")
@@ -445,11 +445,11 @@ def run_sop_pipeline_kwargs(
 
     # 注入列映射到 column_aliases 记忆（Agent 分析 schema 后传入）
     if column_mapping:
-        from data.memory import add_column_alias
+        from menupilot.data.memory import add_column_alias
         for col_name, canonical in column_mapping.items():
             add_column_alias(str(col_name), str(canonical))
 
-    from agent.workflow import run_pipeline
+    from menupilot.agent.workflow import run_pipeline
 
     t0 = time.time()
     try:
@@ -504,7 +504,7 @@ def run_expand_pipeline(args: Optional[list] = None) -> int:
     import argparse as _argparse
 
     parser = _argparse.ArgumentParser(
-        prog="python main.py expand",
+        prog="menupilot expand",
         description="选项规格模板展开器 — 将主数据表的选项值展开为空白模板行",
     )
     parser.add_argument("-m", "--master", required=True, help="选项规格主数据表 Excel 路径")
@@ -529,9 +529,9 @@ def run_expand_pipeline(args: Optional[list] = None) -> int:
         print(f"[ERROR] {e}")
         return 1
 
-    from excel_io.excel_reader import read_option_master
-    from excel_io.excel_writer import write_expanded_template
-    from agent.option_expander import expand_master_to_options, DIMENSIONS
+    from menupilot.excel_io.excel_reader import read_option_master
+    from menupilot.excel_io.excel_writer import write_expanded_template
+    from menupilot.agent.option_expander import expand_master_to_options, DIMENSIONS
 
     print("=" * 56)
     print("  Option Specification Template Expander")

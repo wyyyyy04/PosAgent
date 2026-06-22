@@ -74,7 +74,7 @@ def _apply_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         重命名后的 DataFrame（原位修改 + 返回）。
     """
-    from data.memory import get_column_alias
+    from menupilot.data.memory import get_column_alias
 
     for col in list(df.columns):
         alias = get_column_alias(col)
@@ -266,7 +266,7 @@ if __name__ == "__main__":
     import os, shutil as _shutil
 
     # ── 备份真实 memory.json ──
-    _mem_path = os.path.expanduser("~/.pos_agent/memory.json")
+    _mem_path = os.path.expanduser("~/.menupilot/memory.json")
     _mem_backup = None
     if os.path.exists(_mem_path):
         _mem_backup_path = _mem_path + ".self_test_backup"
@@ -408,7 +408,7 @@ if __name__ == "__main__":
 
         # ── 9. column_aliases 自动重命名 ──
         print("9. column_aliases 自动重命名（温度 → 做法）")
-        from data.memory import reset_memory, add_column_alias
+        from menupilot.data.memory import reset_memory, add_column_alias
         reset_memory()
         alias_path = os.path.join(tmpdir, "alias_master.xlsx")
         pd.DataFrame({
@@ -545,7 +545,7 @@ if __name__ == "__main__":
 
     # ── 还原真实 memory.json ──
     if _mem_backup:
-        from data.memory import reload as _mem_reload
+        from menupilot.data.memory import reload as _mem_reload
         _shutil.move(_mem_backup, _mem_path)
         _mem_reload()
 

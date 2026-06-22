@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from data.token_dict import lookup, is_known, normalize_token, UNKNOWN_TOKEN
+from menupilot.data.token_dict import lookup, is_known, normalize_token, UNKNOWN_TOKEN
 
 # ── Canonical Schema 字段 ─────────────────────────────────────
 

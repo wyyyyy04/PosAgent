@@ -76,7 +76,7 @@ class SessionMemory:
 
 
 def _build_system_prompt(cwd: str = "") -> str:
-    from agent.tools import TOOLS
+    from menupilot.agent.tools import TOOLS
 
     tool_descriptions = []
     for t in TOOLS:
@@ -140,7 +140,7 @@ class AgentLoop:
         self.cwd = cwd or os.getcwd()
         self.recent_calls: deque = deque(maxlen=DUPLICATE_NOTICE_THRESHOLD + 1)
 
-        from agent.tools import TOOLS
+        from menupilot.agent.tools import TOOLS
         self.tools: Dict[str, dict] = {t["name"]: t for t in TOOLS}
         self.memory = SessionMemory()
         self.memory.system_prompt = _build_system_prompt(self.cwd)

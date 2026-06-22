@@ -29,7 +29,7 @@ git push origin master
 
 ## 长期记忆
 
-长期记忆存储于 `~/.pos_agent/memory.json`，不入 git，是用户本地数据。
+长期记忆存储于 `~/.menupilot/memory.json`，不入 git，是用户本地数据。
 `/memory` 指令和运行时未知词确认共用同一存储。
 
 ## 关键约束（不可违反）

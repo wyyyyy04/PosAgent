@@ -7,7 +7,7 @@ __pycache__/
 .env
 
 # Long-term memory (user-local, not in git)
-.pos_agent/
+.menupilot/
 
 # Test data / output
 *.xlsx
@@ -15,8 +15,10 @@ __pycache__/
 *.txt
 !requirements.txt
 
-# Config file
-config.py
+# Build artifacts
+dist/
+build/
+*.egg-info/
 
 thinking.md
 

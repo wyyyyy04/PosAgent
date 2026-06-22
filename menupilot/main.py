@@ -1,10 +1,10 @@
 """
-CLI 入口 — POS Template Mapping Agent。
+CLI 入口 — MenuPilot 智能 POS 模板映射助手。
 一条命令完成 SOP 字段自动映射。
 
 用法:
-    python main.py --master 主数据表.xlsx --template POS模板.xlsx --output 填充结果.xlsx
-    python main.py expand -m 主数据表.xlsx -t 选项模板.xlsx -o 输出.xlsx
+    menupilot --master 主数据表.xlsx --template POS模板.xlsx --output 填充结果.xlsx
+    menupilot expand -m 主数据表.xlsx -t 选项模板.xlsx -o 输出.xlsx
 """
 
 import argparse
@@ -21,14 +21,14 @@ if sys.platform == "win32":
 def build_parser() -> argparse.ArgumentParser:
     """构建 SOP 匹配管线命令行参数解析器。"""
     parser = argparse.ArgumentParser(
-        prog="python main.py",
-        description="POS Template Mapping Agent — 自动将主数据表 SOP 映射到 POS 模板",
+        prog="menupilot",
+        description="MenuPilot — 智能 POS 模板映射助手",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python main.py --master 主数据表.xlsx --template POS模板.xlsx --output 结果.xlsx
-  python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --target-col 配料
-  python main.py -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx -r 报告.txt
+  menupilot --master 主数据表.xlsx --template POS模板.xlsx --output 结果.xlsx
+  menupilot -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx --target-col 配料
+  menupilot -m 主数据表.xlsx -t POS模板.xlsx -o 结果.xlsx -r 报告.txt
 
 --sheet 参数（位置语义）:
   -t template.xlsx --sheet 1    → 模板表读取第 2 个 Sheet
@@ -48,10 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
 def build_expand_parser() -> argparse.ArgumentParser:
     """构建 expand 子命令参数解析器。"""
     parser = argparse.ArgumentParser(
-        prog="python main.py expand",
+        prog="menupilot expand",
         description="选项规格模板展开器 — 将主数据表的选项值展开为空白模板行",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例:\n  python main.py expand -m 选项主数据.xlsx -t 选项模板.xlsx -o 输出.xlsx",
+        epilog="示例:\n  menupilot expand -m 选项主数据.xlsx -t 选项模板.xlsx -o 输出.xlsx",
     )
     parser.add_argument("-m", "--master", required=True, help="选项规格主数据表 Excel 路径")
     parser.add_argument("-t", "--template", required=True, help="空白选项模板 Excel 路径")
@@ -69,22 +69,41 @@ def build_expand_parser() -> argparse.ArgumentParser:
 
 def run(args: Optional[list] = None) -> int:
     """执行 SOP 匹配管线（委托给 agent.orchestration.run_sop_pipeline）。"""
-    from agent.orchestration import run_sop_pipeline
+    from menupilot.agent.orchestration import run_sop_pipeline
     return run_sop_pipeline(args)
 
 
 def run_expand(args: Optional[list] = None) -> int:
     """执行选项展开管线（委托给 agent.orchestration.run_expand_pipeline）。"""
-    from agent.orchestration import run_expand_pipeline
+    from menupilot.agent.orchestration import run_expand_pipeline
     return run_expand_pipeline(args)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# API Key 检查
+# ═══════════════════════════════════════════════════════════════════
+
+def _ensure_api_key():
+    """确保已配置 DeepSeek API Key，否则启动配置向导。"""
+    from menupilot import config
+    if not config.DEEPSEEK_API_KEY:
+        from menupilot.wizard import run_wizard
+        run_wizard()
+        import importlib
+        importlib.reload(config)
+        if not config.DEEPSEEK_API_KEY:
+            print("\n❌ 未配置 API Key，无法启动。"
+                  "请设置环境变量 DEEPSEEK_API_KEY 或运行 menupilot 重新配置。")
+            sys.exit(1)
 
 
 # ═══════════════════════════════════════════════════════════════════
 # 入口调度
 # ═══════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    # expand 子命令路由
+def main():
+    """MenuPilot CLI 主入口。"""
+    # expand 子命令路由（纯规则引擎，无需 API Key）
     if len(sys.argv) > 1 and sys.argv[1] == "expand":
         sys.exit(run_expand(sys.argv[2:]))
 
@@ -95,27 +114,28 @@ if __name__ == "__main__":
         import pandas as pd
 
         # ── 备份真实 memory.json（防止自测清空长期记忆）──
-        _mem_path = os.path.expanduser("~/.pos_agent/memory.json")
+        _mem_path = os.path.expanduser("~/.menupilot/memory.json")
         _mem_backup = None
         if os.path.exists(_mem_path):
             _mem_backup_path = _mem_path + ".self_test_backup"
             shutil.copy(_mem_path, _mem_backup_path)
             _mem_backup = _mem_backup_path
 
-        from agent.orchestration import (
+        from menupilot.agent.orchestration import (
             set_batch_mode, set_column_prompt_hook,
             _batch_mode,
         )
 
         os.environ["USE_MOCK_LLM"] = "1"
         import importlib
-        importlib.reload(__import__("config"))
+        from menupilot import config as _cfg
+        importlib.reload(_cfg)
 
         passed = 0
         failed = 0
 
         def check(condition, msg):
-            global passed, failed
+            nonlocal passed, failed
             if condition:
                 passed += 1
                 print(f"  PASS  {msg}")
@@ -227,7 +247,7 @@ if __name__ == "__main__":
 
             # ── 7. 交互式列分类（Mock hook）──
             print("7. 交互式列分类（_interactive_classify_columns）")
-            from data.memory import reset_memory as mem_reset, get_column_alias as mem_get_col
+            from menupilot.data.memory import reset_memory as mem_reset, get_column_alias as mem_get_col
             mem_reset()
 
             df_interactive = pd.DataFrame({
@@ -245,7 +265,7 @@ if __name__ == "__main__":
                 return mapping.get(col, "ignore")
 
             set_column_prompt_hook(mock_column_hook)
-            import config as cfg_inner
+            from menupilot import config as cfg_inner
             orig_schema = dict(cfg_inner.MOCK_SCHEMA_RESPONSE)
             cfg_inner.MOCK_SCHEMA_RESPONSE = {
                 "field_mapping": {"菜品名称": "product_name", "规格": "size"},
@@ -275,12 +295,12 @@ if __name__ == "__main__":
                     os.remove(f)
             os.rmdir(tmpdir)
 
-        from agent.token_classifier import reset_cache
+        from menupilot.agent.token_classifier import reset_cache
         reset_cache()
 
         # ── 还原真实 memory.json ──
         if _mem_backup:
-            from data.memory import reload as mem_reload
+            from menupilot.data.memory import reload as mem_reload
             shutil.move(_mem_backup, _mem_path)
             mem_reload()
 
@@ -288,7 +308,15 @@ if __name__ == "__main__":
 
     elif len(sys.argv) <= 1:
         # 无参数：进入交互 REPL 模式
-        from cli.repl import repl_loop
+        _ensure_api_key()
+        from menupilot.cli.repl import repl_loop
         repl_loop()
     else:
+        # --help / -h 无需 API Key，直接放行
+        if not (set(sys.argv) & {"--help", "-h"}):
+            _ensure_api_key()
         sys.exit(run())
+
+
+if __name__ == "__main__":
+    main()
