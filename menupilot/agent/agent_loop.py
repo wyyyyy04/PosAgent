@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -75,6 +76,100 @@ class SessionMemory:
     @property
     def turn_count(self) -> int:
         return len(self.messages) // 2
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ProgressTracker — 基于业务语义的卡死检测
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class ProgressSnapshot:
+    """一次工具调用后的进度快照。"""
+    stage: str
+    confirmed_matches: frozenset
+    unresolved_fields: frozenset
+    turn: int
+
+    @staticmethod
+    def _extract_unresolved(result: dict) -> frozenset:
+        """从工具返回值中提取 unresolved 信息。"""
+        items = set()
+        if not isinstance(result, dict):
+            return frozenset()
+        err = result.get("error", "")
+        if err:
+            items.add(str(err)[:80])
+        low = result.get("low_conf", 0)
+        if low:
+            items.add(f"low_conf:{low}")
+        if "缺少" in str(err) or "缺失" in str(err):
+            items.add("missing_fields")
+        return frozenset(items)
+
+    @staticmethod
+    def _extract_confirmed(result: dict) -> frozenset:
+        """从工具返回值中提取已确认的匹配。"""
+        items = set()
+        if not isinstance(result, dict):
+            return frozenset()
+        high = result.get("high_conf", 0)
+        if high:
+            items.add(f"high_conf:{high}")
+        if result.get("ok") is True:
+            items.add("ok")
+        return frozenset(items)
+
+
+class ProgressTracker:
+    """基于业务语义的进度追踪器，区分「推进中」和「真卡死」。"""
+
+    def __init__(self, patience: int = 3):
+        self.history: list[ProgressSnapshot] = []
+        self.patience = patience
+
+    def push(self, snap: ProgressSnapshot):
+        self.history.append(snap)
+
+    def is_stuck(self) -> bool:
+        if len(self.history) < self.patience:
+            return False
+
+        recent = self.history[-self.patience:]
+        last = recent[-1]
+
+        # 收敛到终态 → 不是 stuck
+        if last.stage in ("done", "finalization"):
+            return False
+        # 初始态（什么都没有）→ 不判断
+        if not last.unresolved_fields and not last.confirmed_matches:
+            return False
+
+        # unresolved_fields 在缩小 → 有推进，不是 stuck
+        fields_shrinking = bool(
+            recent[-1].unresolved_fields and
+            recent[-1].unresolved_fields < recent[0].unresolved_fields
+        )
+        if fields_shrinking:
+            return False
+
+        # confirmed_matches 单调不减才算推进，回滚/抖动不算
+        matches_monotone = all(
+            recent[i].confirmed_matches >= recent[i - 1].confirmed_matches
+            for i in range(1, len(recent))
+        )
+        matches_growing = bool(
+            recent[-1].confirmed_matches and
+            recent[-1].confirmed_matches > recent[0].confirmed_matches
+        )
+
+        no_progress = (
+            not fields_shrinking
+            and not matches_growing
+            and not matches_monotone
+        )
+
+        # stage 没变 且 业务没推进 → stuck
+        return len({r.stage for r in recent}) == 1 and no_progress
 
 
 def _build_system_prompt(cwd: str = "") -> str:
@@ -175,7 +270,7 @@ class AgentLoop:
         """内部循环：LLM ↔ 工具执行。"""
         last_error = None
         last_tool_ok = True        # 上一个工具是否返回 ok（非 False）
-        recent_names: list = []    # 滑动窗口：最近调用的工具名
+        tracker = ProgressTracker(patience=3)
 
         for turn in range(1, MAX_TURNS + 1):
             if config.DEBUG:
@@ -218,15 +313,12 @@ class AgentLoop:
                         f"💡 {fatal_msg['hint']}"
                     )
 
-                # ── 工程兜底 2：滑动窗口频率检测 ──
-                recent_names.append(name)
-                if len(recent_names) > 5:
-                    recent_names.pop(0)
-                if recent_names.count("execute_python") >= 3:
+                # ── 工程兜底 2：ProgressTracker 卡死检测 ──
+                if tracker.is_stuck():
                     fatal_msg = {
-                        "error_type": "debug_loop",
-                        "error": f"检测到 execute_python 在最近 5 轮中调用了 {recent_names.count('execute_python')} 次，疑似进入调试死循环。",
-                        "hint": "请停止自行调试，用 ask_user 告知用户当前状态，询问下一步操作。",
+                        "error_type": "stuck_loop",
+                        "error": f"最近 {tracker.patience} 轮无业务推进（stage 未变，confirmed_matches 无增长，unresolved_fields 无缩小），疑似卡死。",
+                        "hint": "请用 ask_user 告知用户当前状态，询问下一步操作。",
                         "fatal": True,
                     }
                     self.memory.add({"role": "assistant", "content": None,
@@ -240,11 +332,21 @@ class AgentLoop:
 
                 result = self._execute_tool(tc)
 
-                # 更新 last_tool_ok
+                # ── 更新 last_tool_ok ──
                 if isinstance(result, dict) and "ok" in result:
                     last_tool_ok = result["ok"] is not False
                 else:
-                    last_tool_ok = True  # 非 ok:false 的返回视为正常
+                    last_tool_ok = True
+
+                # ── 推送进度快照 ──
+                if isinstance(result, dict) and "ok" in result:
+                    snapshot = ProgressSnapshot(
+                        stage=name,
+                        confirmed_matches=ProgressSnapshot._extract_confirmed(result),
+                        unresolved_fields=ProgressSnapshot._extract_unresolved(result),
+                        turn=turn,
+                    )
+                    tracker.push(snapshot)
 
                 # 不可恢复错误 → 立即终止，告知用户
                 if isinstance(result, dict) and result.get("fatal"):
@@ -272,15 +374,14 @@ class AgentLoop:
             print(f"[DEBUG agent] MAX_TURNS ({MAX_TURNS}) reached! Task incomplete.")
             print(f"[DEBUG agent] last_error: {last_error}")
             print(f"[DEBUG agent] Recent calls: {list(self.recent_calls)[-5:]}")
-            print(f"[DEBUG agent] Recent names: {recent_names}")
+            history_stages = [s.stage for s in tracker.history[-5:]]
+            print(f"[DEBUG agent] Recent stages: {history_stages}")
 
-        # 工程兜底 3：MAX_TURNS 耗尽时，从 recent_names 推断原因
-        if not last_error and recent_names:
-            py_count = recent_names.count("execute_python")
-            ask_count = recent_names.count("ask_user")
-            if py_count >= 3:
+        # 工程兜底 3：MAX_TURNS 耗尽时，从 tracker 推断原因
+        if not last_error and tracker.history:
+            if tracker.is_stuck():
                 last_error = {
-                    "error": f"最近 {len(recent_names)} 轮中 execute_python 被调用 {py_count} 次，疑似调试死循环。",
+                    "error": "进度追踪器判定卡死：最近几轮无业务推进。",
                     "hint": "用命令行模式直接执行 menupilot -m ... -t ... -o ... 可绕过 Agent 交互避免轮次消耗。",
                 }
 
