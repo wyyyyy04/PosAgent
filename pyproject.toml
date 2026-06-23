@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "MenuPilot"
-version = "0.1.0"
+version = "0.1.1"
 description = "智能 POS 模板映射助手 — 自动将主数据 SOP 代码填入 POS 模板"
 readme = "README.md"
 license = "MIT"
