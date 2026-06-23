@@ -2,7 +2,7 @@
 交互式 REPL — /指令系统，用于查看和编辑长期记忆。
 
 从 main.py 无参数启动时进入此模式。
-提示符: pos-agent>
+提示符: menupilot>
 """
 
 import os
@@ -49,7 +49,7 @@ def _cmd_help(_args: List[str]) -> str:
     """显示所有可用指令。"""
     return """
 ══════════════════════════════════════════════════
-  POS Agent /指令系统
+  MenuPilot /指令系统
 ══════════════════════════════════════════════════
 
   记忆管理 (/memory):
@@ -460,7 +460,7 @@ def repl_loop() -> None:
 
     while True:
         try:
-            prompt = "pos-agent> " if pending_confirm is None else "  确认? (y/n/yes/不可撤销) > "
+            prompt = "menupilot> " if pending_confirm is None else "  确认? (y/n/yes/不可撤销) > "
             line = input(prompt).strip()
         except (KeyboardInterrupt, EOFError):
             print("\n再见")

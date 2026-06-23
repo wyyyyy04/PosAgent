@@ -55,6 +55,9 @@ LLM_TEMPERATURE = 0.1          # Schema 分析和 Token 分类需要确定性输
 LLM_MAX_TOKENS = 4096
 LLM_TIMEOUT_SECONDS = 30
 
+# 调试模式（环境变量 MENUPILOT_DEBUG=1 开启）
+DEBUG = os.environ.get("MENUPILOT_DEBUG", "0") == "1"
+
 # ── 匹配引擎配置 ────────────────────────────────────────────────
 
 MATCHING_CONFIG = {

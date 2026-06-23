@@ -27,7 +27,7 @@ menupilot expand -m 选项主数据.xlsx -t 选项模板.xlsx -o 输出.xlsx
 
 # 自然语言交互模式
 menupilot
-pos-agent> 把主数据匹配到模板，输出到 result.xlsx
+menupilot> 把主数据匹配到模板，输出到 result.xlsx
 ```
 
 ## 这是什么？
@@ -158,7 +158,7 @@ SOP 匹配管线已完成！以下是执行结果汇总：
 ## 场景二：选项展开（自然语言）
 
 ```bash
-pos-agent> 帮我把主数据testdata/mainproduct.xlsx 映射到testdata/kouwei.xlsx,输出文件为testdata/0617.xlsx
+menupilot> 帮我把主数据testdata/mainproduct.xlsx 映射到testdata/kouwei.xlsx,输出文件为testdata/0617.xlsx
 
 
 Agent: 我已分析两个文件，以下是识别的列映射方案：
@@ -255,7 +255,7 @@ kouwei模板结构说明：
 ## 场景三：SOP 匹配（单商品低覆盖率）
 
 ```bash
-pos-agent> 把主数据testdata/newmaindata映射到testdata/qingticopy.xlsx --sheet 1
+menupilot> 把主数据testdata/newmaindata映射到testdata/qingticopy.xlsx --sheet 1
 
 
 Agent: 我已分析两个文件，以下是自动识别的列映射方案：
@@ -307,7 +307,7 @@ SOP 匹配管线已完成！以下是执行结果汇总：
 2. **芒果波波** — 主数据中只有「少冰」温度，但模板中有「温热」「去冰」「少冰」三种温度；主数据中有中杯和大杯，但大杯的SOP代码在部分糖度组合下缺失（五分糖、三分糖为NaN）
 
 ```bash
-pos-agent> 把所有低置信度的值都去掉
+menupilot> 把所有低置信度的值都去掉
 
 
 已完成！所有低置信度的值已去掉，结果保存到新文件。
@@ -338,7 +338,7 @@ pos-agent> 把所有低置信度的值都去掉
 其余831行的配料列已全部清空（设为NaN）。
 
 ```bash
-pos-agent> 把testdata/qingticopy.xlsx的配料列的内容以，分隔作为单独的元素，并去重
+menupilot> 把testdata/qingticopy.xlsx的配料列的内容以，分隔作为单独的元素，并去重
 
 
 已完成！以下是处理结果：

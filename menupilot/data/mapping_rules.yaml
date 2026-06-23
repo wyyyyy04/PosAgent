@@ -1,4 +1,4 @@
-# PosAgent 模板映射规则
+# MenuPilot 模板映射规则
 # ========================
 # 从 agent/rule_engine.py、data/canonical_schema.py、data/token_dict.py、
 # agent/matching_engine.py、config.py 中提取，作为映射规则的声明式参考。
@@ -10,7 +10,7 @@
 # 更新日期：2026-06-16
 
 version: "1.0"
-description: "PosAgent 模板映射规则 — 所有模板字段统一转换为此内部标准结构"
+description: "MenuPilot 模板映射规则 — 所有模板字段统一转换为此内部标准结构"
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. Canonical Schema（内部标准字段）

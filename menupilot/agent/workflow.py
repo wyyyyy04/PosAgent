@@ -28,6 +28,7 @@ from menupilot.agent.rule_engine import (
 from menupilot.agent.schema_analyzer import analyze_from_dataframe
 from menupilot.agent.token_classifier import classify_from_dataframe, reset_cache as tc_reset_cache
 from menupilot.excel_io.excel_reader import read_master, read_template
+from menupilot import config
 from menupilot.excel_io.excel_writer import write_result
 
 # ── 工作流状态键 ────────────────────────────────────────────────
@@ -416,31 +417,34 @@ def step_write_output(state: PipelineState) -> PipelineState:
 
 
 def route_after_load(state: PipelineState) -> str:
-    """load_data 之后的条件路由。
-
-    - 有错误 → 直接跳到 write_output
-    - chowbus 模板 → preprocess
-    - standard 模板 → analyze_schema
-    """
+    """load_data 之后的条件路由。"""
     if state.get("error") is not None:
+        if config.DEBUG:
+            print(f"[DEBUG workflow] route_after_load: error=true → write_output")
         return "write_output"
-    if state.get("template_type") == "chowbus":
+    ttype = state.get("template_type", "standard")
+    if ttype == "chowbus":
+        if config.DEBUG:
+            print(f"[DEBUG workflow] route_after_load: template_type=chowbus → preprocess")
         return "preprocess"
+    if config.DEBUG:
+        print(f"[DEBUG workflow] route_after_load: template_type={ttype} → analyze_schema")
     return "analyze_schema"
 
 
 def route_after_match(state: PipelineState) -> str:
-    """match 之后的条件路由。
-
-    - 有错误 → 直接跳到 write_output
-    - 有 LOW_CONFIDENCE 行 → human_review
-    - 全部 HIGH → write_output
-    """
+    """match 之后的条件路由。"""
     if state.get("error") is not None:
+        if config.DEBUG:
+            print(f"[DEBUG workflow] route_after_match: error=true → write_output")
         return "write_output"
     low_conf = state.get("low_conf_rows", [])
     if low_conf:
+        if config.DEBUG:
+            print(f"[DEBUG workflow] route_after_match: low_conf_rows={len(low_conf)} → human_review (but node is DISABLED, will pass through)")
         return "human_review"
+    if config.DEBUG:
+        print(f"[DEBUG workflow] route_after_match: low_conf=0 → write_output")
     return "write_output"
 
 
@@ -462,11 +466,16 @@ def step_human_review(state: PipelineState) -> PipelineState:
     前提：interrupt_before 挂起后，外部通过 update_state 注入
     human_review_result。本节点读取该字段并应用到 match_results。
 
-    逻辑：
-      - accept/manual → 升级对应行为 HIGH，写入长期记忆
-      - permanent_skip → 写入 __SKIP__ 到长期记忆，保持 LOW_CONFIDENCE
-      - skip → 不写记忆，保持 LOW_CONFIDENCE
+    当前状态：已禁用（interrupt/resume 代码已注释），
+    本节点作为 pass-through 运行，不修改任何状态。
     """
+    if config.DEBUG:
+        low = len(state.get("low_conf_rows", []))
+        has_review = bool(state.get("human_review_result"))
+        print(f"[DEBUG workflow] step_human_review: low_conf={low}, has_review_result={has_review}")
+        if low and not has_review:
+            print(f"[DEBUG workflow]   → pass-through (review disabled, {low} low_conf rows remain unresolved)")
+
     review_result = state.get("human_review_result", {})
     if not review_result:
         return state
@@ -650,6 +659,13 @@ def run_pipeline(
     Raises:
         ImportError: use_langgraph=True 但 langgraph 未安装。
     """
+    if config.DEBUG:
+        print(f"\n[DEBUG workflow] run_pipeline() called")
+        print(f"[DEBUG workflow]   master={master_path}")
+        print(f"[DEBUG workflow]   template={template_path} sheet={template_sheet}")
+        print(f"[DEBUG workflow]   output={output_path}")
+        print(f"[DEBUG workflow]   use_langgraph={use_langgraph}")
+
     state = make_pipeline_state(
         master_path=master_path,
         template_path=template_path,
@@ -671,8 +687,8 @@ def run_pipeline(
     if use_langgraph:
         import uuid
         app = build_graph()
-        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-        result = app.invoke(state, config)
+        lg_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        result = app.invoke(state, lg_config)
 
         # Human Review 已禁用：输出报告后直接结束
         # （保留 interrupt/resume 代码，需要时取消注释即可恢复）
@@ -693,6 +709,13 @@ def run_pipeline(
         from menupilot.agent.schema_analyzer import get_api_call_count as _sa_count
         from menupilot.agent.token_classifier import get_api_call_count as _tc_count
         result["api_call_count"] = _sa_count() + _tc_count()
+        if config.DEBUG:
+            err = result.get("error")
+            low = len(result.get("low_conf_rows", []))
+            high = len(result.get("high_conf_rows", []))
+            print(f"[DEBUG workflow] LangGraph invoke complete")
+            print(f"[DEBUG workflow]   error={err}, high_conf={high}, low_conf={low}")
+            print(f"[DEBUG workflow]   review_status={'disabled (skipped)' if low else 'n/a'}")
         return result
 
     # 纯顺序执行
@@ -707,8 +730,16 @@ def run_pipeline(
     ]
 
     for step_name, step_fn in steps:
+        if config.DEBUG:
+            print(f"[DEBUG workflow] current_node: {step_name}")
         step_fn(state)
+        if config.DEBUG:
+            err = state.get("error")
+            print(f"[DEBUG workflow] {step_name} done, error={'YES' if err else 'none'}, "
+                  f"review_status={'low_conf=' + str(len(state.get('low_conf_rows', []))) if not err else 'N/A'}")
         if state.get("error") is not None:
+            if config.DEBUG:
+                print(f"[DEBUG workflow] STOP on error at {step_name}")
             break
 
     # Human Review 已禁用：输出报告后直接结束

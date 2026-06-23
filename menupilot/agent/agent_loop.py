@@ -14,6 +14,8 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from menupilot import config
+
 # ── 常量 ──────────────────────────────────────────────────────────
 
 MAX_TURNS = 15
@@ -84,7 +86,7 @@ def _build_system_prompt(cwd: str = "") -> str:
         param_str = ", ".join(f"{k}: {v.get('type','str')}" for k, v in params.items())
         tool_descriptions.append(f"- **{t['name']}**({param_str}): {t['description']}")
 
-    return f"""你是 PosAgent，一个奶茶/餐饮行业的 POS 模板自动化助手。
+    return f"""你是 MenuPilot，一个奶茶/餐饮行业的 POS 模板自动化助手。
 
 ## 工具
 {chr(10).join(tool_descriptions)}
@@ -100,6 +102,15 @@ def _build_system_prompt(cwd: str = "") -> str:
 - 工具返回 retryable:false → 换一种方式，不要用相同参数重试
 - 工具返回 retryable:true → 可以纠正参数后重试，最多 2 次
 - 所有错误必须告知用户具体原因和建议，禁止静默吞掉
+
+## 工具返回 ok:false 时的处理规则（重要）
+当 run_sop_matching / run_option_expansion 返回 ok:false 时，先判断：
+1. 我能获取到修复所需的信息吗？
+   → 如果能（如调整参数、换 sheet），尝试自主修复，最多 1 次
+2. 修复需要用户提供数据或决策吗？
+   → 立即用 ask_user 把 error 信息展示给用户，说明问题并告知需要什么
+禁止：收到 ok:false 后调用 execute_python 自行调试 —— 你应该问用户，不是自己查数据
+禁止：在无法获取新信息的情况下，重复读取同一个 Excel 文件超过 2 次
 
 ## 交互效率
 - 展示信息和确认操作合并为一次 ask_user 调用
@@ -147,28 +158,93 @@ class AgentLoop:
 
     def run(self, user_input: str) -> str:
         """新会话：清空记忆，开始 Agent loop。"""
+        if config.DEBUG:
+            print(f"[DEBUG agent] run() — new session, user_input: {user_input[:200]}")
         self.memory.reset_task()
         self.memory.add({"role": "user", "content": user_input})
         return self._loop()
 
     def continue_conversation(self, user_input: str) -> str:
         """继续已有会话：追加用户消息，继续 loop。"""
+        if config.DEBUG:
+            print(f"[DEBUG agent] continue_conversation() — user_input: {user_input[:200]}")
         self.memory.add({"role": "user", "content": user_input})
         return self._loop()
 
     def _loop(self) -> str:
         """内部循环：LLM ↔ 工具执行。"""
         last_error = None
+        last_tool_ok = True        # 上一个工具是否返回 ok（非 False）
+        recent_names: list = []    # 滑动窗口：最近调用的工具名
 
         for turn in range(1, MAX_TURNS + 1):
+            if config.DEBUG:
+                print(f"\n[DEBUG agent] === Turn {turn}/{MAX_TURNS} ===")
+                msgs = self.memory.to_llm_input()
+                last_user = ""
+                for m in reversed(msgs):
+                    if m.get("role") == "user":
+                        last_user = str(m.get("content", ""))[:200]
+                        break
+                if last_user:
+                    print(f"[DEBUG agent] Last user msg: {last_user}")
+
             response = self._call_llm(self.memory.to_llm_input())
 
             if not response.get("tool_calls"):
                 self.memory.add({"role": "assistant", "content": response.get("content", "")})
+                if config.DEBUG:
+                    print(f"[DEBUG agent] LLM returned text (no tool_calls) → loop ends")
+                    print(f"[DEBUG agent] Response: {str(response.get('content',''))[:300]}")
                 return response.get("content", "")
 
             for tc in response["tool_calls"]:
+                name = tc.get("_name", "")
+
+                # ── 工程兜底 1：ok:false 之后禁止调用 execute_python ──
+                if not last_tool_ok and name == "execute_python":
+                    fatal_msg = {
+                        "error_type": "debug_loop",
+                        "error": "上一个操作未成功（ok:false），禁止继续自我调试。请把问题告知用户。",
+                        "hint": "用 ask_user 把上一个工具的 error 信息展示给用户，询问如何处理。",
+                        "fatal": True,
+                    }
+                    self.memory.add({"role": "assistant", "content": None,
+                                     "tool_calls": [self._make_tool_msg(tc)]})
+                    self.memory.add({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps(fatal_msg, ensure_ascii=False)})
+                    return (
+                        f"操作无法继续：{fatal_msg['error']}\n\n"
+                        f"💡 {fatal_msg['hint']}"
+                    )
+
+                # ── 工程兜底 2：滑动窗口频率检测 ──
+                recent_names.append(name)
+                if len(recent_names) > 5:
+                    recent_names.pop(0)
+                if recent_names.count("execute_python") >= 3:
+                    fatal_msg = {
+                        "error_type": "debug_loop",
+                        "error": f"检测到 execute_python 在最近 5 轮中调用了 {recent_names.count('execute_python')} 次，疑似进入调试死循环。",
+                        "hint": "请停止自行调试，用 ask_user 告知用户当前状态，询问下一步操作。",
+                        "fatal": True,
+                    }
+                    self.memory.add({"role": "assistant", "content": None,
+                                     "tool_calls": [self._make_tool_msg(tc)]})
+                    self.memory.add({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps(fatal_msg, ensure_ascii=False)})
+                    return (
+                        f"操作无法继续：{fatal_msg['error']}\n\n"
+                        f"💡 {fatal_msg['hint']}"
+                    )
+
                 result = self._execute_tool(tc)
+
+                # 更新 last_tool_ok
+                if isinstance(result, dict) and "ok" in result:
+                    last_tool_ok = result["ok"] is not False
+                else:
+                    last_tool_ok = True  # 非 ok:false 的返回视为正常
 
                 # 不可恢复错误 → 立即终止，告知用户
                 if isinstance(result, dict) and result.get("fatal"):
@@ -192,6 +268,22 @@ class AgentLoop:
                 })
 
         # 超时 → 带上最后失败原因
+        if config.DEBUG:
+            print(f"[DEBUG agent] MAX_TURNS ({MAX_TURNS}) reached! Task incomplete.")
+            print(f"[DEBUG agent] last_error: {last_error}")
+            print(f"[DEBUG agent] Recent calls: {list(self.recent_calls)[-5:]}")
+            print(f"[DEBUG agent] Recent names: {recent_names}")
+
+        # 工程兜底 3：MAX_TURNS 耗尽时，从 recent_names 推断原因
+        if not last_error and recent_names:
+            py_count = recent_names.count("execute_python")
+            ask_count = recent_names.count("ask_user")
+            if py_count >= 3:
+                last_error = {
+                    "error": f"最近 {len(recent_names)} 轮中 execute_python 被调用 {py_count} 次，疑似调试死循环。",
+                    "hint": "用命令行模式直接执行 menupilot -m ... -t ... -o ... 可绕过 Agent 交互避免轮次消耗。",
+                }
+
         if last_error:
             return (
                 f"已执行 {MAX_TURNS} 轮，仍未能完成任务。\n\n"
@@ -217,6 +309,10 @@ class AgentLoop:
             }}
             for t in self.tools.values()
         ]
+        if config.DEBUG and messages:
+            last = messages[-1]
+            print(f"[DEBUG agent] Calling LLM, last msg role={last.get('role')}, "
+                  f"content={str(last.get('content',''))[:150]}")
         try:
             completion = self.llm.chat.completions.create(
                 model=self.llm.model, messages=messages,
@@ -236,13 +332,21 @@ class AgentLoop:
                                      "arguments": json.dumps(args, ensure_ascii=False)},
                         "_parsed_args": args, "_name": tc.function.name,
                     })
+            if config.DEBUG:
+                tc_names = [t["_name"] for t in tool_calls]
+                print(f"[DEBUG agent] LLM returned {len(tool_calls)} tool_calls: {tc_names}")
             return {"content": msg.content, "tool_calls": tool_calls}
         except Exception as e:
+            if config.DEBUG:
+                print(f"[DEBUG agent] LLM call FAILED: {e}")
             return {"content": f"LLM 调用失败: {e}", "tool_calls": []}
 
     def _execute_tool(self, tc: dict) -> dict:
         name = tc.get("_name", tc.get("name", ""))
         args = tc.get("_parsed_args", tc.get("arguments", {}))
+        if config.DEBUG:
+            args_str = json.dumps(args, ensure_ascii=False, default=str)[:200]
+            print(f"[DEBUG agent] Executing tool: {name}({args_str})")
         tool = self.tools.get(name)
         if not tool:
             return {
@@ -255,38 +359,54 @@ class AgentLoop:
         call_hash = self._hash_call(name, args)
         self.recent_calls.append(call_hash)
         if self._count_recent(call_hash) >= DUPLICATE_NOTICE_THRESHOLD:
-            return {
+            result = {
                 "error_type": "duplicate_call",
                 "notice": f"'{name}' 已连续调用 {DUPLICATE_NOTICE_THRESHOLD} 次且参数相同。"
                           f"如果这是预期行为请忽略，否则请换一种策略。",
                 "retryable": True,
             }
+            if config.DEBUG:
+                print(f"[DEBUG agent] Tool result (duplicate): {json.dumps(result, ensure_ascii=False)[:200]}")
+            return result
         try:
-            return tool["handler"](**args)
+            result = tool["handler"](**args)
+            if config.DEBUG:
+                rstr = json.dumps(self._sanitize(result), ensure_ascii=False, default=str)[:300]
+                print(f"[DEBUG agent] Tool result: {rstr}")
+            return result
         except PermissionError as e:
-            return {
+            result = {
                 "error_type": "file_locked",
                 "error": f"文件被占用，无法写入: {e}",
                 "hint": "请关闭 Excel 中打开的输出文件后重试，或换一个输出文件名",
                 "retryable": False,
                 "fatal": True,
             }
+            if config.DEBUG:
+                print(f"[DEBUG agent] Tool result (fatal): {result.get('error')}")
+            return result
         except FileNotFoundError as e:
-            return {
+            result = {
                 "error_type": "file_not_found",
                 "error": f"文件不存在: {e}",
                 "hint": "请检查文件路径是否正确，文件是否已被移动或删除",
                 "retryable": False,
                 "fatal": True,
             }
+            if config.DEBUG:
+                print(f"[DEBUG agent] Tool result (fatal): {result.get('error')}")
+            return result
         except Exception as e:
-            return {
+            result = {
                 "error_type": type(e).__name__,
                 "error": f"{type(e).__name__}: {e}",
                 "hint": "请将此错误展示给用户，询问是否需要帮助排查",
                 "retryable": True,
                 "fatal": False,
             }
+            if config.DEBUG:
+                print(f"[DEBUG agent] Tool result (exception): {result.get('error')}")
+            return result
 
     @staticmethod
     def _sanitize(obj):
