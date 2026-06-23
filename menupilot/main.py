@@ -240,7 +240,7 @@ def main():
             print("  6a: --sheet 1 在 -t 后 → 模板 Sheet 1")
             exit_code6a = run(["-m", master_multi, "-t", template_multi, "--sheet", "1", "-o", output_path])
             check(exit_code6a == 0, f"exit_code=0（实际 {exit_code6a}）")
-            df_6a = pd.read_excel(output_path)
+            df_6a = pd.read_excel(output_path, sheet_name=1)  # template_sheet=1 → 结果在 Sheet1
             check(df_6a.iloc[0]["配料"] == "SHEET0_WRONG",
                   f"主数据 Sheet 0，SOP=SHEET0_WRONG（实际 {df_6a.iloc[0]['配料']}）")
             print()

@@ -396,6 +396,7 @@ def step_write_output(state: PipelineState) -> PipelineState:
             target_col=state["target_col"],
             header_row=1,
             data_start_row=3 if state["template_type"] == "chowbus" else None,
+            sheet_name=state.get("template_sheet", 0),
         )
 
         # 生成用户友好摘要报告（文件 = 完整日志）

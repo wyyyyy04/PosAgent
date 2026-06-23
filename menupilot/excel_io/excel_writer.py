@@ -24,6 +24,7 @@ def write_result(
     confidence_col: str = CONFIDENCE_COLUMN,
     header_row: int = 1,
     data_start_row: Optional[int] = None,
+    sheet_name: int = 0,
 ) -> str:
     """将匹配结果写入 Excel，保留模板原始格式。
 
@@ -39,6 +40,7 @@ def write_result(
         header_row: 用于搜索目标列/置信度列的表头行号（1=第一行）。
         data_start_row: 数据写入起始行号，默认 = header_row + 1。
             chowbus 模板应传 header_row=1, data_start_row=3（跳过两行表头）。
+        sheet_name: 目标 Sheet 名称或索引（0=第一个 Sheet）。
 
     Returns:
         output_path
@@ -47,7 +49,10 @@ def write_result(
         data_start_row = header_row + 1
 
     wb = openpyxl.load_workbook(template_path)
-    ws = wb.active
+    if isinstance(sheet_name, int):
+        ws = wb.worksheets[sheet_name]
+    else:
+        ws = wb[sheet_name]
 
     # 定位目标列和置信度列的列号（始终在 header_row 搜索）
     target_col_idx = None
@@ -64,12 +69,12 @@ def write_result(
     if target_col_idx is None:
         # 目标列不存在，追加到末尾
         target_col_idx = max_col + 1
-        ws.cell(row=1, column=target_col_idx, value=target_col)
+        ws.cell(row=header_row, column=target_col_idx, value=target_col)
 
     if confidence_col_idx is None:
         # 置信度列不存在，追加到目标列后面
         confidence_col_idx = target_col_idx + 1
-        ws.cell(row=1, column=confidence_col_idx, value=confidence_col)
+        ws.cell(row=header_row, column=confidence_col_idx, value=confidence_col)
 
     # 写入数据
     for i, (_, row) in enumerate(result_df.iterrows()):
