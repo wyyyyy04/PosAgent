@@ -16,6 +16,9 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from menupilot import config
+from menupilot.agent.context_mode import ContextMode, filter_tools
+from menupilot.agent.conflict_resolver import FieldBinding, apply_patch
+from menupilot.agent.mapping_parser import ParseResult
 
 # ── 常量 ──────────────────────────────────────────────────────────
 
@@ -251,20 +254,202 @@ class AgentLoop:
         self.memory = SessionMemory()
         self.memory.system_prompt = _build_system_prompt(self.cwd)
 
+        # ── Context Mode 状态机 ──
+        self.context_mode: ContextMode = ContextMode.NORMAL
+        self.pending_mapping: dict[str, FieldBinding] = {}
+
     def run(self, user_input: str) -> str:
-        """新会话：清空记忆，开始 Agent loop。"""
+        """新会话：清空记忆 + 重置 context_mode，开始 Agent loop。"""
         if config.DEBUG:
             print(f"[DEBUG agent] run() — new session, user_input: {user_input[:200]}")
         self.memory.reset_task()
+        self.context_mode = ContextMode.NORMAL
+        self.pending_mapping = {}
         self.memory.add({"role": "user", "content": user_input})
         return self._loop()
 
     def continue_conversation(self, user_input: str) -> str:
-        """继续已有会话：追加用户消息，继续 loop。"""
+        """继续已有会话：根据 context_mode 路由到对应处理逻辑。"""
         if config.DEBUG:
-            print(f"[DEBUG agent] continue_conversation() — user_input: {user_input[:200]}")
+            print(f"[DEBUG agent] continue_conversation() — mode={self.context_mode}, input={user_input[:200]}")
+
+        # ── AWAITING_CONFIRMATION：只接受 yes/no ──
+        if self.context_mode == ContextMode.AWAITING_CONFIRMATION:
+            return self._handle_awaiting_confirmation(user_input)
+
+        # ── MAPPING_BUILDING：直接进 MappingParser，不走通用 LLM ──
+        if self.context_mode == ContextMode.MAPPING_BUILDING:
+            return self._handle_mapping_building(user_input)
+
+        # ── EXECUTING：只允许执行工具，跳过 Intent Router ──
+        if self.context_mode == ContextMode.EXECUTING:
+            self.memory.add({"role": "user", "content": user_input})
+            return self._loop()
+
+        # ── NORMAL：先检测意图，可能切换 mode ──
+        intent = self._detect_intent(user_input)
+        if config.DEBUG:
+            print(f"[DEBUG agent] Intent detected: {intent}")
+
+        if intent == "PROVIDE_MAPPING_RULE":
+            self.context_mode = ContextMode.MAPPING_BUILDING
+            return self._handle_mapping_building(user_input)
+
+        if intent == "EXECUTE_TASK":
+            self.context_mode = ContextMode.EXECUTING
+            self.memory.add({"role": "user", "content": user_input})
+            return self._loop()
+
+        # intent == "ASK_QUESTION" 或其他 → 正常 LLM 回复
         self.memory.add({"role": "user", "content": user_input})
         return self._loop()
+
+    # ═════════════════════════════════════════════════════════════
+    # Intent Detection + Context Mode Handlers
+    # ═════════════════════════════════════════════════════════════
+
+    INTENT_PROMPT = """判断用户输入的意图类别。只输出一个词。
+
+类别：
+- PROVIDE_MAPPING_RULE: 用户在告知/修正列映射规则。例如「一级分类默认为AUUUU」「规格价格对应规格名称」「二级分类对应三级分类」。
+- EXECUTE_TASK: 用户确认执行、要求运行管线。例如「是」「yes」「执行」「开始」「好的」「确认」。
+- ASK_QUESTION: 用户在问问题、提供信息、或闲聊。
+
+只输出上面三个词之一，不要其他内容。"""
+
+    def _detect_intent(self, user_input: str) -> str:
+        """判断用户意图（轻量 LLM 调用）。"""
+        # 快速规则判断 避免 LLM 调用
+        stripped = user_input.strip().lower()
+        if stripped in ("是", "yes", "y", "执行", "开始", "确认", "ok", "好的", "可以"):
+            return "EXECUTE_TASK"
+
+        # 包含「对应」「默认」「映射」「->」「→」等 → 很可能是映射规则
+        mapping_keywords = ("对应", "默认", "映射到", "->", "→", "改为", "设置", "配置")
+        if any(k in user_input for k in mapping_keywords):
+            return "PROVIDE_MAPPING_RULE"
+
+        # 否则用 LLM 判断
+        try:
+            completion = self.llm.chat.completions.create(
+                model=self.llm.model,
+                messages=[
+                    {"role": "system", "content": self.INTENT_PROMPT},
+                    {"role": "user", "content": user_input[:500]},
+                ],
+                temperature=0.0,
+                max_tokens=10,
+            )
+            raw = completion.choices[0].message.content.strip().upper()
+            for token in ("PROVIDE_MAPPING_RULE", "EXECUTE_TASK", "ASK_QUESTION"):
+                if token in raw:
+                    return token
+        except Exception:
+            pass
+        return "ASK_QUESTION"
+
+    def _handle_mapping_building(self, user_input: str) -> str:
+        """MAPPING_BUILDING 模式：用 MappingParser 解析用户映射规则。"""
+        self.memory.add({"role": "user", "content": user_input})
+
+        # 调用 MappingParser（专用 LLM prompt）
+        from menupilot.agent.mapping_parser import (
+            build_parser_messages, parse_llm_response,
+        )
+        msgs = build_parser_messages(
+            self.pending_mapping,
+            user_input,
+            list(self.memory.messages),
+        )
+
+        try:
+            completion = self.llm.chat.completions.create(
+                model=self.llm.model,
+                messages=msgs,
+                temperature=0.1,
+                max_tokens=1024,
+            )
+            raw = completion.choices[0].message.content or ""
+            result = parse_llm_response(raw)
+        except Exception as e:
+            result = ParseResult(is_unambiguous=False, patch=None, ambiguity_reason=str(e))
+
+        if config.DEBUG:
+            print(f"[DEBUG agent] MappingParser result: is_unambiguous={result.is_unambiguous}")
+
+        if result.is_unambiguous and result.patch:
+            # 通过 Conflict Resolver 应用 patch
+            new_mapping, conflicts = apply_patch(self.pending_mapping, result.patch)
+            self.pending_mapping = new_mapping
+
+            conflict_msgs = []
+            for c in conflicts:
+                if c["decision"] == "BLOCK":
+                    conflict_msgs.append(
+                        f"⚠️ 「{c['field']}」已有用户指定值「{c['existing_value']}」，"
+                        f"新值「{c['incoming_value']}」优先级较低，已忽略。"
+                    )
+                elif c["decision"] == "REQUIRE_CONFIRMATION":
+                    conflict_msgs.append(
+                        f"❓ 「{c['field']}」之前设为「{c['existing_value']}」，"
+                        f"现在改为「{c['incoming_value']}」，需要确认。"
+                    )
+
+            summary_lines = ["已更新字段映射："]
+            for k, v in result.patch.items():
+                if k in new_mapping and new_mapping[k] is v:
+                    summary_lines.append(f"  ✅ {k} → {v.value}")
+            summary = "\n".join(summary_lines)
+            if conflict_msgs:
+                summary += "\n\n" + "\n".join(conflict_msgs)
+
+            # 进入等待确认
+            self.context_mode = ContextMode.AWAITING_CONFIRMATION
+
+            return (
+                f"{summary}\n\n"
+                f"当前映射配置：\n{self._format_pending_mapping()}\n\n"
+                f"是否确认此映射方案？（输入是/否）"
+            )
+
+        # is_unambiguous=False
+        self.context_mode = ContextMode.AWAITING_CONFIRMATION
+        reason = result.ambiguity_reason or "无法唯一确定映射"
+        return (
+            f"❓ 无法完全确定您的映射意图。\n\n"
+            f"原因：{reason}\n\n"
+            f"当前映射配置：\n{self._format_pending_mapping()}\n\n"
+            f"请补充说明，或输入「是」确认当前方案、输入「否」放弃。"
+        )
+
+    def _handle_awaiting_confirmation(self, user_input: str) -> str:
+        """AWAITING_CONFIRMATION 模式：只接受 yes/no。"""
+        stripped = user_input.strip().lower()
+        is_yes = stripped in ("是", "yes", "y", "确认", "ok", "好的", "可以", "执行")
+        is_no = stripped in ("否", "no", "n", "取消", "不要", "不对")
+
+        if is_yes:
+            self.context_mode = ContextMode.EXECUTING
+            self.memory.add({"role": "user", "content": "确认执行。当前映射配置已生效，请使用 run_sop_matching 执行。"})
+            return self._loop()
+
+        if is_no:
+            self.context_mode = ContextMode.MAPPING_BUILDING
+            return "已取消确认。请重新描述映射规则，或输入 /exit 退出。"
+
+        # 不是 yes/no → 当作映射规则补充
+        self.context_mode = ContextMode.MAPPING_BUILDING
+        return self._handle_mapping_building(user_input)
+
+    def _format_pending_mapping(self) -> str:
+        """格式化 pending_mapping 为可读文本。"""
+        if not self.pending_mapping:
+            return "  （暂无映射配置）"
+        lines = []
+        for k, v in self.pending_mapping.items():
+            src_label = {"explicit_user": "用户指定", "llm_inferred": "LLM推断", "default": "默认"}.get(v.source, v.source)
+            lines.append(f"  {k} → {v.value}  ({src_label})")
+        return "\n".join(lines)
 
     def _loop(self) -> str:
         """内部循环：LLM ↔ 工具执行。"""
@@ -403,12 +588,17 @@ class AgentLoop:
         }
 
     def _call_llm(self, messages: list) -> dict:
+        # 根据 context_mode 过滤可用工具
+        active_tools = filter_tools(self.tools, self.context_mode)
+        if config.DEBUG and active_tools != self.tools:
+            removed = set(self.tools) - set(active_tools)
+            print(f"[DEBUG agent] Tools filtered by mode={self.context_mode}: removed={removed}")
         tool_schemas = [
             {"type": "function", "function": {
                 "name": t["name"], "description": t["description"],
                 "parameters": t["parameters"],
             }}
-            for t in self.tools.values()
+            for t in active_tools.values()
         ]
         if config.DEBUG and messages:
             last = messages[-1]
