@@ -134,18 +134,65 @@ def run_sop_matching(
             "type": "string",
             "description": "输出 Excel 文件路径",
         },
+        "sheet_name": {
+            "type": "integer",
+            "description": "主数据表 Sheet 序号，默认 0",
+        },
     },
     category="pipeline",
 )
 def run_option_expansion(
     master_path: str, template_path: str, output_path: str,
+    sheet_name: int = 0,
 ) -> dict:
-    """执行选项规格展开管线。"""
-    from menupilot.agent.orchestration import run_expand_pipeline
-    exit_code = run_expand_pipeline([
-        "--master", master_path, "--template", template_path, "--output", output_path,
-    ])
-    return {"ok": exit_code == 0, "output_path": output_path, "exit_code": exit_code}
+    """执行选项规格展开管线。返回结构化结果含行数统计。"""
+    import time
+    t0 = time.time()
+    try:
+        from menupilot.excel_io.excel_reader import read_option_master
+        from menupilot.excel_io.excel_writer import write_expanded_template
+        from menupilot.agent.option_expander import expand_master_to_options, DIMENSIONS
+
+        master_df = read_option_master(master_path, sheet_name=sheet_name)
+        expanded_df = expand_master_to_options(master_df)
+        write_expanded_template(template_path, output_path, expanded_df)
+
+        expanded_rows = len(expanded_df)
+        ok = expanded_rows > 0
+
+        dim_counts = {}
+        if not expanded_df.empty:
+            for dim in DIMENSIONS:
+                count = int(expanded_df["口味做法组名"].value_counts().get(dim, 0))
+                dim_counts[dim] = count
+
+        elapsed = round(time.time() - t0, 2)
+
+        result = {
+            "ok": ok,
+            "output_path": output_path,
+            "expanded_rows": expanded_rows,
+            "master_rows": len(master_df),
+            "dim_counts": dim_counts,
+            "sheet_used": str(sheet_name),
+            "elapsed": elapsed,
+        }
+        if not ok:
+            result["error"] = (
+                f"展开完成但生成行数为 0。"
+                f"主数据 {len(master_df)} 行中所有维度的值均为空/NaN，"
+                f"请检查 sheet_name (当前={sheet_name}) 或主数据列映射是否正确。"
+            )
+        return result
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "output_path": output_path,
+            "expanded_rows": 0,
+            "sheet_used": str(sheet_name),
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════

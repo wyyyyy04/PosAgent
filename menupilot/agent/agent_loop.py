@@ -257,6 +257,7 @@ class AgentLoop:
         # ── Context Mode 状态机 ──
         self.context_mode: ContextMode = ContextMode.NORMAL
         self.pending_mapping: dict[str, FieldBinding] = {}
+        self._current_turn: int = 0
 
     def run(self, user_input: str) -> str:
         """新会话：清空记忆 + 重置 context_mode，开始 Agent loop。"""
@@ -308,45 +309,89 @@ class AgentLoop:
     # Intent Detection + Context Mode Handlers
     # ═════════════════════════════════════════════════════════════
 
-    INTENT_PROMPT = """判断用户输入的意图类别。只输出一个词。
-
-类别：
-- PROVIDE_MAPPING_RULE: 用户在告知/修正列映射规则。例如「一级分类默认为AUUUU」「规格价格对应规格名称」「二级分类对应三级分类」。
-- EXECUTE_TASK: 用户确认执行、要求运行管线。例如「是」「yes」「执行」「开始」「好的」「确认」。
-- ASK_QUESTION: 用户在问问题、提供信息、或闲聊。
-
-只输出上面三个词之一，不要其他内容。"""
-
     def _detect_intent(self, user_input: str) -> str:
-        """判断用户意图（轻量 LLM 调用）。"""
-        # 快速规则判断 避免 LLM 调用
+        """判断用户意图。动词不参与路由，对象类型是主分类。
+
+        Step 1: classify_object_type → FILE / FIELD / UNKNOWN
+        Step 2: 同时命中裁决 — FILE 降级为上下文，FIELD 是真正的操作对象
+        """
+        # Step 0: 快速 yes/no
         stripped = user_input.strip().lower()
         if stripped in ("是", "yes", "y", "执行", "开始", "确认", "ok", "好的", "可以"):
             return "EXECUTE_TASK"
 
-        # 包含「对应」「默认」「映射」「->」「→」等 → 很可能是映射规则
-        mapping_keywords = ("对应", "默认", "映射到", "->", "→", "改为", "设置", "配置")
-        if any(k in user_input for k in mapping_keywords):
-            return "PROVIDE_MAPPING_RULE"
+        # Step 1: 对象分类
+        schema_keys = self._get_schema_keys()
+        has_file = self._is_file_object(user_input)
+        has_field = self._is_field_object(user_input, schema_keys)
 
-        # 否则用 LLM 判断
-        try:
-            completion = self.llm.chat.completions.create(
-                model=self.llm.model,
-                messages=[
-                    {"role": "system", "content": self.INTENT_PROMPT},
-                    {"role": "user", "content": user_input[:500]},
-                ],
-                temperature=0.0,
-                max_tokens=10,
-            )
-            raw = completion.choices[0].message.content.strip().upper()
-            for token in ("PROVIDE_MAPPING_RULE", "EXECUTE_TASK", "ASK_QUESTION"):
-                if token in raw:
-                    return token
-        except Exception:
-            pass
-        return "ASK_QUESTION"
+        if config.DEBUG:
+            print(f"[DEBUG agent] Intent: has_file={has_file}, has_field={has_field}, schema_keys={schema_keys}")
+
+        # Step 3: 同时命中裁决
+        # FILE 降级为上下文（"在 mainproduct.xlsx 里…"），FIELD 是操作对象
+        if has_file and has_field:
+            return "PROVIDE_MAPPING_RULE"
+        elif has_file:
+            return "EXECUTE_TASK"
+        elif has_field:
+            return "PROVIDE_MAPPING_RULE"
+        else:
+            return "ASK_QUESTION"  # 对象不明确，交给 LLM 正常回复
+
+    def _is_file_object(self, text: str) -> bool:
+        """判断输入是否涉及文件/路径/数据源。"""
+        file_indicators = (
+            ".xlsx", ".xls", ".csv", "Sheet", "sheet",
+            "testdata", "输出", "文件", "路径",
+        )
+        # 路径特征：盘符:\ 或 \\
+        has_path = ":" in text and "\\" in text
+        return has_path or any(k in text for k in file_indicators)
+
+    def _is_field_object(self, text: str, schema_keys: frozenset) -> bool:
+        """判断输入是否涉及 schema 字段。
+
+        schema_keys 从 pending_mapping 的 key 集合 + 对话中已知的列名动态生成。
+        不用写死关键词。
+        """
+        if not schema_keys:
+            return False
+        return any(k in text for k in schema_keys)
+
+    def _get_schema_keys(self) -> frozenset:
+        """从 pending_mapping + 对话中 LLM 展示的列名动态提取。"""
+        keys = set(self.pending_mapping.keys())
+
+        # 从最近的 assistant 消息中提取列名
+        # LLM 展示映射方案时用的格式：
+        #   | 规格价格 | → | 规格名称 |  或  规格价格 → 规格名称
+        #   | **一级商品分类** | **默认值 AUUUU** |
+        import re
+        recent_text = ""
+        for msg in list(self.memory.messages)[-10:]:
+            if msg.get("role") == "assistant":
+                recent_text += str(msg.get("content", ""))[:3000]
+
+        # 匹配 markdown 表格中的中文 cell（含可选的 * 标记）
+        # "| 规格价格 |"、"| *规格名称_1 |"、"| **一级商品分类** |"
+        col_names = set(re.findall(
+            r'\|\s*\*{0,2}([一-鿿][一-鿿_a-zA-Z0-9\*]{1,20})\*{0,2}\s*\|',
+            recent_text
+        ))
+        # 也匹配 "中文名 → 中文名" 格式
+        arrow_names = set(re.findall(
+            r'([一-鿿]{2,12})\s*[→]\s*',
+            recent_text
+        ))
+        keys.update(col_names)
+        keys.update(arrow_names)
+        # 过滤掉非列名的通用词
+        generic = {"是", "否", "说明", "注意", "默认值", "必填项", "模板列", "主数据列",
+                    "请问", "是否", "确认", "执行", "输出", "路径", "文件"}
+        keys.difference_update(generic)
+
+        return frozenset(keys)
 
     def _handle_mapping_building(self, user_input: str) -> str:
         """MAPPING_BUILDING 模式：用 MappingParser 解析用户映射规则。"""
@@ -458,6 +503,7 @@ class AgentLoop:
         tracker = ProgressTracker(patience=3)
 
         for turn in range(1, MAX_TURNS + 1):
+            self._current_turn = turn
             if config.DEBUG:
                 print(f"\n[DEBUG agent] === Turn {turn}/{MAX_TURNS} ===")
                 msgs = self.memory.to_llm_input()
@@ -660,7 +706,23 @@ class AgentLoop:
                 print(f"[DEBUG agent] Tool result (duplicate): {json.dumps(result, ensure_ascii=False)[:200]}")
             return result
         try:
+            # ── task_context 注入：LLM 遗漏的 sheet_name/master_sheet 等 ──
+            if name in ("run_option_expansion", "run_sop_matching"):
+                tc = self.memory.task_context
+                if "sheet_name" not in args and "master_sheet" in tc:
+                    args = dict(args)
+                    args["sheet_name"] = tc["master_sheet"]
+                if "template_sheet" not in args and "template_sheet" in tc:
+                    args = dict(args)
+                    args["template_sheet"] = tc["template_sheet"]
             result = tool["handler"](**args)
+            # ── 提取 task_context 信息（read_excel_info 结果） ──
+            if name == "read_excel_info" and isinstance(result, dict):
+                fp = result.get("filepath", "")
+                if fp and "sheet_name" in args:
+                    # 记住：此文件在本会话中已读取的 sheet
+                    pass
+                # 如果有明确的 sheet 分配，写入 task_context
             if config.DEBUG:
                 rstr = json.dumps(self._sanitize(result), ensure_ascii=False, default=str)[:300]
                 print(f"[DEBUG agent] Tool result: {rstr}")

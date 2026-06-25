@@ -557,3 +557,42 @@ REPL 内支持以下斜杠指令：
 - **REQUIRED_DIMENSIONS**（规格/做法/糖）列不存在：抛出 `ValueError`，这是真正的数据问题
 - **matching_engine 无需修改**：已有 `_empty(m_val)` → 通配分支，列不存在时 `m_val` 为 None 直接命中
 - **自测更新**：新增 22 个边界 case（73/73 passed）
+
+### Context Mode 状态机 + Intent Router（本轮 `d972217`）
+
+**问题**：用户告知列映射规则（如「一级分类默认为AUUUU」）时，LLM 将其误判为数据查询操作，直接走错执行路径。
+
+**架构**：
+
+```
+用户输入
+    ↓
+context_mode 检查
+    ├── NORMAL → Intent Router（对象分类）→ 切换 mode
+    ├── MAPPING_BUILDING → MappingParser → Conflict Resolver → AWAITING_CONFIRMATION
+    ├── AWAITING_CONFIRMATION → yes/no → EXECUTING / MAPPING_BUILDING
+    └── EXECUTING → 执行工具，跳过 Intent Router
+```
+
+**核心模块**：
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| ContextMode | `agent/context_mode.py` | 4 状态机 + 各状态下的工具白名单（硬性约束，非提示） |
+| Intent Router | `agent/agent_loop.py:_detect_intent()` | 对象分类：FILE vs FIELD → 裁决 |
+| MappingParser | `agent/mapping_parser.py` | LLM 提取用户映射意图 → `ParseResult`（is_unambiguous + patch） |
+| Conflict Resolver | `agent/conflict_resolver.py` | 来源优先级（explicit_user=3 > llm_inferred=2 > default=1） |
+
+**Intent Router 规则**（动词不参与路由，对象类型是主分类）：
+
+1. `is_file_object(text)` — 检测文件/路径/数据源（`.xlsx`、`D:\`、`Sheet`、`输出`、`文件`）
+2. `is_field_object(text, schema_keys)` — 从 `pending_mapping` key 集合 + LLM 对话中动态提取的列名匹配
+3. 同时命中 → FILE 降级为上下文，FIELD 是操作对象 → `PROVIDE_MAPPING_RULE`
+
+**Conflict Resolver 覆盖规则**：
+
+| 方向 | 例子 | 结果 |
+|------|------|------|
+| 高覆盖低 | explicit_user 覆盖 llm_inferred | 静默生效 |
+| 同级覆盖同级 | explicit_user 覆盖 explicit_user | 要求确认 |
+| 低覆盖高 | llm_inferred 覆盖 explicit_user | 直接拦截 |
