@@ -474,6 +474,16 @@ class AgentLoop:
         is_no = stripped in ("否", "no", "n", "取消", "不要", "不对")
 
         if is_yes:
+            EXECUTE_MIN_TURNS = 4
+            turns_remaining = MAX_TURNS - self._current_turn
+            if turns_remaining < EXECUTE_MIN_TURNS:
+                msg = (
+                    f"当前已用 {self._current_turn} 轮，剩余 {turns_remaining} 轮"
+                    f"不足以完成执行（至少需要 {EXECUTE_MIN_TURNS} 轮）。"
+                    f"请重新发起任务。"
+                )
+                self.memory.add({"role": "assistant", "content": msg})
+                return msg
             self.context_mode = ContextMode.EXECUTING
             self.memory.add({"role": "user", "content": "确认执行。当前映射配置已生效，请使用 run_sop_matching 执行。"})
             return self._loop()
