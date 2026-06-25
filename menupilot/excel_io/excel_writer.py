@@ -140,7 +140,8 @@ def write_expanded_template(
     template_path: str,
     output_path: str,
     expanded_df: pd.DataFrame,
-    header_row: int = 1,
+    header_row: int = 2,
+    data_start_row: int = 4,
 ) -> str:
     """将展开后的选项规格数据写入模板 Excel，保留原始格式。
 
@@ -150,7 +151,9 @@ def write_expanded_template(
         template_path: 空白选项模板 Excel 路径（含表头，无数据行）。
         output_path: 输出文件路径。
         expanded_df: expand_master_to_options() 返回的 DataFrame。
-        header_row: 列头所在行号（1=第一行）。
+        header_row: 列头所在行号（1=第一行），默认 2。
+        data_start_row: 数据写入起始行号，默认 4。
+            独立于 header_row，因为模板可能有说明行（如第3行）。
 
     Returns:
         output_path
@@ -194,8 +197,6 @@ def write_expanded_template(
             ws.cell(row=header_row, column=next_col, value=col_name)
             col_map[col_name] = next_col
             next_col += 1
-
-    data_start_row = header_row + 1
 
     # ── Step 2: 清除表头以下的旧数据 ──
     for row in range(data_start_row, ws.max_row + 1):
